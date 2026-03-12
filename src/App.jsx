@@ -139,7 +139,28 @@ const KanbanDropdown = ({ order, setData, pushLog }) => {
 
 // ==================== ПАРСЕР EXTERNAL PO из строк с \n ====================
 // Формат: если PO начинается с "~" — он отменён (зачёркнут)
-// (parseExternalPOs удалён — зачёркивание только для номеров PO, данные поставщика — на уровне заказа)
+const parseExternalPOs = (order) => {
+  const refs = (order.internalPoRef || "").split("\n").map((s) => s.trim()).filter(Boolean);
+  const suppliers = (order.supplierName || "").split("\n").map((s) => s.trim()).filter(Boolean);
+  const payments = (order.paymentStatusSupplier || "").split("\n").map((s) => s.trim()).filter(Boolean);
+  const payCompanies = (order.payingCompany || "").split("\n").map((s) => s.trim()).filter(Boolean);
+  const amounts = (order.supplierAmounts || "").split("\n").map((s) => s.trim()).filter(Boolean);
+  const count = Math.max(refs.length, 1);
+  const result = [];
+  for (let i = 0; i < count; i++) {
+    const rawPo = refs[i] || "";
+    const cancelled = rawPo.startsWith("~");
+    result.push({
+      po: cancelled ? rawPo.substring(1) : rawPo,
+      supplier: suppliers[i] || (suppliers.length === 1 ? suppliers[0] : ""),
+      payment: payments[i] || (payments.length === 1 ? payments[0] : ""),
+      payingCompany: payCompanies[i] || (payCompanies.length === 1 ? payCompanies[0] : ""),
+      supplierAmount: amounts[i] || "",
+      cancelled,
+    });
+  }
+  return result;
+};
 
 // ==================== ПАРСЕР ДОСТАВКИ: план / факт ====================
 const parseDeliveryCost = (raw) => {
@@ -1475,10 +1496,9 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
     customer: "", respSales: "", internalPo: "", dateOrdered: new Date().toISOString().split("T")[0],
     customerDeadline: "", termsDelivery: "", customerAmount: 0, paymentStatusCustomer: "",
     dateCustomerPaid: "", datePlacedSupplier: "", respProcurement: "",
-    supplierName: "", supplierAmount: 0, paymentStatusSupplier: "", payingCompany: "",
     deliveryCost: 0, awb: "", tracking: "", comments: "", mgmtComments: "",
     type: "domestic",
-    externalPOs: [{ po: "", cancelled: false }],
+    externalOrders: [{ po: "", supplier: "", supplierAmount: 0, payment: "", payingCompany: "", cancelled: false }],
   });
   const PP = 30;
 
@@ -1570,10 +1590,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
 
   const startEdit = (r) => {
     setEditModal(r);
-    const poRefs = (r.internalPoRef || "").split("\n").map((s) => s.trim()).filter(Boolean);
-    const extPOs = poRefs.length > 0
-      ? poRefs.map((ref) => ({ po: ref.startsWith("~") ? ref.substring(1) : ref, cancelled: ref.startsWith("~") }))
-      : [{ po: "", cancelled: false }];
+    const exts = parseExternalPOs(r);
     setEditForm({
       customer: r.customer, respSales: r.respSales, internalPo: r.internalPo,
       customerAmount: r.customerAmount,
@@ -1582,22 +1599,24 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
       respProcurement: r.respProcurement,
       customerDeadline: r.customerDeadline, termsDelivery: r.termsDelivery,
       hasUpd: r.hasUpd || false, updNum: r.updNum || "", updDate: r.updDate || "", updFile: r.updFile || null,
-      supplierName: r.supplierName || "", supplierAmount: r.supplierAmount || 0,
-      paymentStatusSupplier: r.paymentStatusSupplier || "", payingCompany: r.payingCompany || "",
-      externalPOs: extPOs,
+      externalOrders: exts,
     });
   };
 
   const saveEdit = () => {
     if (!editModal) return;
     pushLog({ type: "po_edit", id: editModal.id, prev: { ...editModal } });
-    const pRefs = (editForm.externalPOs || []).map((e) => (e.cancelled ? "~" : "") + e.po).join("\n");
+    const exts = editForm.externalOrders || [];
     const updatedForm = {
       ...editForm,
-      internalPoRef: pRefs,
-      supplierAmount: parseFloat(editForm.supplierAmount) || 0,
+      internalPoRef: exts.map((e) => (e.cancelled ? "~" : "") + e.po).join("\n"),
+      supplierName: exts.map((e) => e.supplier).join("\n"),
+      supplierAmount: exts.reduce((s, e) => s + (parseFloat(e.supplierAmount) || 0), 0),
+      supplierAmounts: exts.map((e) => e.supplierAmount || "0").join("\n"),
+      paymentStatusSupplier: exts.map((e) => e.payment).join("\n"),
+      payingCompany: exts.map((e) => e.payingCompany).join("\n"),
     };
-    delete updatedForm.externalPOs;
+    delete updatedForm.externalOrders;
     // Если удалили УПД — сбросить поля
     if (!updatedForm.hasUpd) {
       updatedForm.updNum = "";
@@ -1610,29 +1629,33 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
     setEditModal(null);
   };
 
+  const emptyExtPO = { po: "", supplier: "", supplierAmount: 0, payment: "", payingCompany: "", cancelled: false };
   const handleAddPO = () => {
     const id = Math.max(...data.map((o) => o.id), 0) + 1;
     const num = String(data.length + 1);
-    const pRefs = (newPO.externalPOs || []).map((e) => (e.cancelled ? "~" : "") + e.po).join("\n");
+    const exts = newPO.externalOrders || [emptyExtPO];
     const assembled = {
       ...newPO,
       id, num, status: "active", hasUpd: false, updNum: "", updDate: "", updFile: null, cancelReason: "",
       customerAmount: parseFloat(newPO.customerAmount) || 0,
-      supplierAmount: parseFloat(newPO.supplierAmount) || 0,
+      supplierAmount: exts.reduce((s, e) => s + (parseFloat(e.supplierAmount) || 0), 0),
       deliveryCost: parseFloat(newPO.deliveryCost) || 0,
-      internalPoRef: pRefs,
+      internalPoRef: exts.map((e) => (e.cancelled ? "~" : "") + e.po).join("\n"),
+      supplierName: exts.map((e) => e.supplier).join("\n"),
+      supplierAmounts: exts.map((e) => e.supplierAmount || "0").join("\n"),
+      paymentStatusSupplier: exts.map((e) => e.payment).join("\n"),
+      payingCompany: exts.map((e) => e.payingCompany).join("\n"),
     };
-    delete assembled.externalPOs;
+    delete assembled.externalOrders;
     setData([...data, assembled]);
     setShowAdd(false);
     setNewPO({
       customer: "", respSales: "", internalPo: "", dateOrdered: new Date().toISOString().split("T")[0],
       customerDeadline: "", termsDelivery: "", customerAmount: 0, paymentStatusCustomer: "",
       dateCustomerPaid: "", datePlacedSupplier: "", respProcurement: "",
-      supplierName: "", supplierAmount: 0, paymentStatusSupplier: "", payingCompany: "",
       deliveryCost: 0, awb: "", tracking: "", comments: "", mgmtComments: "",
       type: "domestic",
-      externalPOs: [{ po: "", cancelled: false }],
+      externalOrders: [{ ...emptyExtPO }],
     });
   };
 
@@ -1938,25 +1961,22 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
               <div className="py-2 border-b border-slate-700/30"><div className="text-slate-500 text-xs mb-1">Customer Amount</div><div className="text-slate-200 font-bold">${fmt(detailModal.customerAmount)}</div></div>
               <div className="py-2 border-b border-slate-700/30"><div className="text-slate-500 text-xs mb-1">Payment Status</div><div className="text-slate-200">{detailModal.paymentStatusCustomer || "—"}</div></div>
               <div className="py-2 border-b border-slate-700/30"><div className="text-slate-500 text-xs mb-1">Date Customer Paid</div><div className="text-slate-200 whitespace-pre-wrap">{detailModal.dateCustomerPaid || "—"}</div></div>
-              <div className="py-2 border-b border-slate-700/30">
-                <div className="text-slate-500 text-xs mb-1">External PO</div>
-                <div className="text-slate-200 font-mono space-y-0.5">
-                  {(detailModal.internalPoRef || "").split("\n").map((s) => s.trim()).filter(Boolean).map((ref, ri) => {
-                    const isCancelled = ref.startsWith("~");
-                    return <div key={ri} className={isCancelled ? "line-through text-gray-500" : ""}>{isCancelled ? ref.substring(1) : ref}{isCancelled ? " (отменён)" : ""}</div>;
-                  })}
-                  {!(detailModal.internalPoRef || "").trim() && <span>—</span>}
-                </div>
-              </div>
+              <div className="py-2 border-b border-slate-700/30"><div className="text-slate-500 text-xs mb-1">External PO</div><div className="text-slate-200 font-mono whitespace-pre-wrap">{detailModal.internalPoRef || "—"}</div></div>
             </div>
             <div className="border-t border-slate-700/50 pt-4">
-              <div className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Данные поставщика</div>
-              <div className="grid grid-cols-2 gap-3 text-sm">
-                <div className="py-2 border-b border-slate-700/30"><div className="text-slate-500 text-xs mb-1">Поставщик</div><div className="text-slate-200 whitespace-pre-wrap">{detailModal.supplierName || "—"}</div></div>
-                <div className="py-2 border-b border-slate-700/30"><div className="text-slate-500 text-xs mb-1">Сумма поставщика</div><div className="text-slate-200 font-bold">${fmt(detailModal.supplierAmount)}</div></div>
-                <div className="py-2 border-b border-slate-700/30"><div className="text-slate-500 text-xs mb-1">Статус оплаты</div><div className={`font-medium ${(detailModal.paymentStatusSupplier || "").toLowerCase().includes("paid") && !(detailModal.paymentStatusSupplier || "").toLowerCase().includes("not") ? "text-emerald-400" : "text-amber-400"}`}>{detailModal.paymentStatusSupplier || "—"}</div></div>
-                <div className="py-2 border-b border-slate-700/30"><div className="text-slate-500 text-xs mb-1">Плат. компания</div><div className="text-slate-200">{detailModal.payingCompany || "—"}</div></div>
+              <div className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">External PO (заказы поставщикам)</div>
+              {parseExternalPOs(detailModal).map((ext, ei) => (
+                <div key={ei} className={`bg-slate-700/30 rounded-lg p-3 mb-2 grid grid-cols-2 gap-2 text-sm`}>
+                  <div><div className="text-slate-500 text-[10px] mb-0.5">External PO</div><div className={`text-slate-200 font-mono ${ext.cancelled ? "line-through text-gray-500" : ""}`}>{ext.po || "—"}{ext.cancelled ? " (отменён)" : ""}</div></div>
+                  <div><div className="text-slate-500 text-[10px] mb-0.5">Поставщик</div><div className="text-slate-200">{ext.supplier || "—"}</div></div>
+                  <div><div className="text-slate-500 text-[10px] mb-0.5">Сумма ($)</div><div className="text-slate-200 font-bold">{ext.supplierAmount ? "$" + fmt(parseFloat(ext.supplierAmount) || 0) : "—"}</div></div>
+                  <div><div className="text-slate-500 text-[10px] mb-0.5">Статус оплаты</div><div className={`font-medium ${(ext.payment || "").toLowerCase().includes("paid") && !(ext.payment || "").toLowerCase().includes("not") ? "text-emerald-400" : "text-amber-400"}`}>{ext.payment || "—"}</div></div>
+                  <div><div className="text-slate-500 text-[10px] mb-0.5">Плат. компания</div><div className="text-slate-200">{ext.payingCompany || "—"}</div></div>
+                </div>
+              ))}
+              <div className="grid grid-cols-2 gap-3 text-sm mt-2">
                 <div className="py-2 border-b border-slate-700/30"><div className="text-slate-500 text-xs mb-1">Resp. Procurement</div><div className="text-slate-200">{detailModal.respProcurement || "—"}</div></div>
+                <div className="py-2 border-b border-slate-700/30"><div className="text-slate-500 text-xs mb-1">Общая сумма поставщикам</div><div className="text-slate-200 font-bold">${fmt(detailModal.supplierAmount)}</div></div>
                 <div className="py-2 border-b border-slate-700/30"><div className="text-slate-500 text-xs mb-1">Date Paid Supplier</div><div className="text-slate-200 whitespace-pre-wrap">{detailModal.datePaidSupplier || "—"}</div></div>
                 <div className="py-2 border-b border-slate-700/30"><div className="text-slate-500 text-xs mb-1">Delivery Cost</div><div className="text-slate-200">{detailModal.deliveryCost ? "$" + fmt(detailModal.deliveryCost) : "—"}</div></div>
                 <div className="py-2 border-b border-slate-700/30"><div className="text-slate-500 text-xs mb-1">AWB</div><div className="text-slate-200 text-xs whitespace-pre-wrap">{detailModal.awb || "—"}</div></div>
@@ -1993,38 +2013,52 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
               <InputField label="Resp. Procurement" value={editForm.respProcurement} onChange={(v) => setEditForm({ ...editForm, respProcurement: v })} />
             </div>
 
-            {/* Блок External PO — только номера заказов */}
+            {/* Блок External PO */}
             <div className="border border-slate-600 rounded-lg p-3 space-y-3">
               <div className="flex items-center justify-between">
-                <span className="text-sm font-semibold text-slate-300">External PO (номера заказов)</span>
-                <button onClick={() => setEditForm({ ...editForm, externalPOs: [...(editForm.externalPOs || []), { po: "", cancelled: false }] })}
+                <span className="text-sm font-semibold text-slate-300">External PO (заказы поставщикам)</span>
+                <button onClick={() => setEditForm({ ...editForm, externalOrders: [...(editForm.externalOrders || []), { po: "", supplier: "", supplierAmount: 0, payment: "", payingCompany: "", cancelled: false }] })}
                   className="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white rounded text-xs font-medium transition-colors">+ Добавить PO</button>
               </div>
-              {(editForm.externalPOs || []).map((ext, ei) => (
-                <div key={ei} className="flex items-center gap-2">
-                  <input type="text" value={ext.po} placeholder="PO номер"
-                    onChange={(e) => { const upd = [...editForm.externalPOs]; upd[ei] = { ...upd[ei], po: e.target.value }; setEditForm({ ...editForm, externalPOs: upd }); }}
-                    className={`flex-1 px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500 ${ext.cancelled ? "line-through opacity-50" : ""}`} />
-                  <label className="text-[10px] text-red-400 flex items-center gap-1 whitespace-nowrap">
-                    <input type="checkbox" checked={ext.cancelled || false} onChange={(e) => {
-                      const upd = [...editForm.externalPOs]; upd[ei] = { ...upd[ei], cancelled: e.target.checked };
-                      setEditForm({ ...editForm, externalPOs: upd });
-                    }} /> Отменён
-                  </label>
-                  {(editForm.externalPOs || []).length > 1 && (
-                    <button onClick={() => setEditForm({ ...editForm, externalPOs: editForm.externalPOs.filter((_, i) => i !== ei) })}
-                      className="text-red-400 hover:text-red-300 text-sm" title="Удалить">✕</button>
+              {(editForm.externalOrders || []).map((ext, ei) => (
+                <div key={ei} className="bg-slate-700/40 rounded-lg p-3 relative">
+                  {(editForm.externalOrders || []).length > 1 && (
+                    <button onClick={() => setEditForm({ ...editForm, externalOrders: editForm.externalOrders.filter((_, i) => i !== ei) })}
+                      className="absolute top-2 right-2 text-red-400 hover:text-red-300 text-xs" title="Удалить">✕</button>
                   )}
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">External PO #{ei + 1}</span>
+                    <label className="text-[10px] text-red-400 flex items-center gap-1 ml-auto">
+                      <input type="checkbox" checked={ext.cancelled || false} onChange={(e) => {
+                        const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], cancelled: e.target.checked };
+                        setEditForm({ ...editForm, externalOrders: upd });
+                      }} /> Отменён
+                    </label>
+                  </div>
+                  <div className={`grid grid-cols-2 gap-2 ${ext.cancelled ? "opacity-50" : ""}`}>
+                    <InputField label="External PO" value={ext.po} onChange={(v) => {
+                      const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], po: v };
+                      setEditForm({ ...editForm, externalOrders: upd });
+                    }} />
+                    <InputField label="Поставщик" value={ext.supplier} onChange={(v) => {
+                      const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], supplier: v };
+                      setEditForm({ ...editForm, externalOrders: upd });
+                    }} />
+                    <InputField label="Сумма ($)" value={ext.supplierAmount} onChange={(v) => {
+                      const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], supplierAmount: v };
+                      setEditForm({ ...editForm, externalOrders: upd });
+                    }} type="number" />
+                    <InputField label="Статус оплаты" value={ext.payment} onChange={(v) => {
+                      const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], payment: v };
+                      setEditForm({ ...editForm, externalOrders: upd });
+                    }} />
+                    <InputField label="Плат. компания" value={ext.payingCompany} onChange={(v) => {
+                      const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], payingCompany: v };
+                      setEditForm({ ...editForm, externalOrders: upd });
+                    }} />
+                  </div>
                 </div>
               ))}
-            </div>
-
-            {/* Поставщик — данные на уровне заказа */}
-            <div className="grid grid-cols-2 gap-3">
-              <InputField label="Поставщик" value={editForm.supplierName} onChange={(v) => setEditForm({ ...editForm, supplierName: v })} />
-              <InputField label="Сумма поставщика ($)" value={editForm.supplierAmount} onChange={(v) => setEditForm({ ...editForm, supplierAmount: v })} type="number" />
-              <InputField label="Статус оплаты поставщику" value={editForm.paymentStatusSupplier} onChange={(v) => setEditForm({ ...editForm, paymentStatusSupplier: v })} />
-              <InputField label="Платежная компания" value={editForm.payingCompany} onChange={(v) => setEditForm({ ...editForm, payingCompany: v })} />
             </div>
 
             <div className="grid grid-cols-2 gap-3">
@@ -2100,38 +2134,52 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
             <InputField label="Resp. Procurement" value={newPO.respProcurement} onChange={(v) => setNewPO({ ...newPO, respProcurement: v })} placeholder="Напр.: KV" />
           </div>
 
-          {/* Блок External PO — только номера заказов */}
+          {/* Блок External PO */}
           <div className="border border-slate-600 rounded-lg p-3 space-y-3">
             <div className="flex items-center justify-between">
-              <span className="text-sm font-semibold text-slate-300">External PO (номера заказов)</span>
-              <button onClick={() => setNewPO({ ...newPO, externalPOs: [...(newPO.externalPOs || []), { po: "", cancelled: false }] })}
+              <span className="text-sm font-semibold text-slate-300">External PO (заказы поставщикам)</span>
+              <button onClick={() => setNewPO({ ...newPO, externalOrders: [...(newPO.externalOrders || []), { ...emptyExtPO }] })}
                 className="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white rounded text-xs font-medium transition-colors">+ Добавить PO</button>
             </div>
-            {(newPO.externalPOs || []).map((ext, ei) => (
-              <div key={ei} className="flex items-center gap-2">
-                <input type="text" value={ext.po} placeholder="PO номер *"
-                  onChange={(e) => { const upd = [...newPO.externalPOs]; upd[ei] = { ...upd[ei], po: e.target.value }; setNewPO({ ...newPO, externalPOs: upd }); }}
-                  className={`flex-1 px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500 ${ext.cancelled ? "line-through opacity-50" : ""}`} />
-                <label className="text-[10px] text-red-400 flex items-center gap-1 whitespace-nowrap">
-                  <input type="checkbox" checked={ext.cancelled || false} onChange={(e) => {
-                    const upd = [...newPO.externalPOs]; upd[ei] = { ...upd[ei], cancelled: e.target.checked };
-                    setNewPO({ ...newPO, externalPOs: upd });
-                  }} /> Отменён
-                </label>
-                {(newPO.externalPOs || []).length > 1 && (
-                  <button onClick={() => setNewPO({ ...newPO, externalPOs: newPO.externalPOs.filter((_, i) => i !== ei) })}
-                    className="text-red-400 hover:text-red-300 text-sm" title="Удалить">✕</button>
+            {(newPO.externalOrders || []).map((ext, ei) => (
+              <div key={ei} className="bg-slate-700/40 rounded-lg p-3 relative">
+                {(newPO.externalOrders || []).length > 1 && (
+                  <button onClick={() => setNewPO({ ...newPO, externalOrders: newPO.externalOrders.filter((_, i) => i !== ei) })}
+                    className="absolute top-2 right-2 text-red-400 hover:text-red-300 text-xs" title="Удалить">✕</button>
                 )}
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">External PO #{ei + 1}</span>
+                  <label className="text-[10px] text-red-400 flex items-center gap-1 ml-auto">
+                    <input type="checkbox" checked={ext.cancelled || false} onChange={(e) => {
+                      const upd = [...newPO.externalOrders]; upd[ei] = { ...upd[ei], cancelled: e.target.checked };
+                      setNewPO({ ...newPO, externalOrders: upd });
+                    }} /> Отменён
+                  </label>
+                </div>
+                <div className={`grid grid-cols-2 gap-2 ${ext.cancelled ? "opacity-50" : ""}`}>
+                  <InputField label="External PO *" value={ext.po} onChange={(v) => {
+                    const upd = [...newPO.externalOrders]; upd[ei] = { ...upd[ei], po: v };
+                    setNewPO({ ...newPO, externalOrders: upd });
+                  }} placeholder="PO230xxx" />
+                  <InputField label="Поставщик" value={ext.supplier} onChange={(v) => {
+                    const upd = [...newPO.externalOrders]; upd[ei] = { ...upd[ei], supplier: v };
+                    setNewPO({ ...newPO, externalOrders: upd });
+                  }} />
+                  <InputField label="Сумма поставщика ($)" value={ext.supplierAmount} onChange={(v) => {
+                    const upd = [...newPO.externalOrders]; upd[ei] = { ...upd[ei], supplierAmount: v };
+                    setNewPO({ ...newPO, externalOrders: upd });
+                  }} type="number" />
+                  <InputField label="Статус оплаты" value={ext.payment} onChange={(v) => {
+                    const upd = [...newPO.externalOrders]; upd[ei] = { ...upd[ei], payment: v };
+                    setNewPO({ ...newPO, externalOrders: upd });
+                  }} placeholder="paid / not paid" />
+                  <InputField label="Платежная компания" value={ext.payingCompany} onChange={(v) => {
+                    const upd = [...newPO.externalOrders]; upd[ei] = { ...upd[ei], payingCompany: v };
+                    setNewPO({ ...newPO, externalOrders: upd });
+                  }} />
+                </div>
               </div>
             ))}
-          </div>
-
-          {/* Поставщик — данные на уровне заказа */}
-          <div className="grid grid-cols-2 gap-3">
-            <InputField label="Поставщик" value={newPO.supplierName} onChange={(v) => setNewPO({ ...newPO, supplierName: v })} />
-            <InputField label="Сумма поставщика ($)" value={newPO.supplierAmount} onChange={(v) => setNewPO({ ...newPO, supplierAmount: v })} type="number" />
-            <InputField label="Статус оплаты поставщику" value={newPO.paymentStatusSupplier} onChange={(v) => setNewPO({ ...newPO, paymentStatusSupplier: v })} placeholder="paid / not paid" />
-            <InputField label="Платежная компания" value={newPO.payingCompany} onChange={(v) => setNewPO({ ...newPO, payingCompany: v })} />
           </div>
 
           <div className="grid grid-cols-2 gap-3">
