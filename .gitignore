@@ -1,0 +1,6 @@
+node_modules/
+dist/
+*.xlsx
+*.log
+.DS_Store
+Thumbs.db
