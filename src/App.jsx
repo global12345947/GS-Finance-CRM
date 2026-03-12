@@ -754,19 +754,69 @@ const Dashboard = ({ balances, debts, finResults }) => {
   );
 };
 
+// ==================== КАНБАН СТАТУС ФИН. РЕЗУЛЬТАТ ====================
+const FIN_STAGES = [
+  { key: "active", label: "В работе", color: "bg-blue-500", text: "text-blue-800", light: "bg-blue-100", border: "border-blue-400" },
+  { key: "completed", label: "Выполнен", color: "bg-emerald-500", text: "text-emerald-800", light: "bg-emerald-100", border: "border-emerald-500" },
+];
+
+const FinStatusDropdown = ({ order, onChangeStatus }) => {
+  const [open, setOpen] = useState(false);
+  const ref = React.useRef(null);
+  const current = FIN_STAGES.find((s) => s.key === order.status) || FIN_STAGES[0];
+
+  React.useEffect(() => {
+    if (!open) return;
+    const close = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+
+  return (
+    <div className="relative" ref={ref}>
+      <button onClick={(e) => { e.stopPropagation(); setOpen(!open); }}
+        className={`px-2 py-1 rounded text-[10px] font-semibold cursor-pointer transition-all hover:ring-2 hover:ring-blue-300 whitespace-nowrap ${current.light} ${current.text} border ${current.border}`}>
+        {current.label}
+      </button>
+      {open && (
+        <div className="absolute z-50 top-full mt-1 left-0 bg-white rounded-xl shadow-2xl border border-gray-200 p-2 min-w-[200px]"
+          onClick={(e) => e.stopPropagation()}>
+          <div className="text-[10px] text-gray-400 font-medium uppercase tracking-wider mb-2 px-1">Статус заказа</div>
+          <div className="flex flex-col gap-1">
+            {FIN_STAGES.map((s) => {
+              const isActive = s.key === order.status;
+              return (
+                <button key={s.key} onClick={() => { onChangeStatus(order, s.key); setOpen(false); }}
+                  className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-all text-left ${
+                    isActive ? `${s.light} ${s.text} ring-2 ${s.border} ring-offset-1` : "hover:bg-gray-50 text-gray-700"
+                  }`}>
+                  <div className={`w-3 h-3 rounded-full flex-shrink-0 ${isActive ? s.color : "border-2 border-gray-300"}`}>
+                    {isActive && <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/></svg>}
+                  </div>
+                  <span className="flex-1">{s.label}</span>
+                  {isActive && <span className="text-[9px] font-bold uppercase tracking-wider opacity-60">Текущий</span>}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ==================== ФИН. РЕЗУЛЬТАТ ====================
 const FinResults = ({ data, setData, pushLog }) => {
   const [filter, setFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(-1); // -1 = auto-last-page
-  const [updModal, setUpdModal] = useState(null);
-  const [updForm, setUpdForm] = useState({ num: "", date: "", file: null, noGS: false });
   const [detailModal, setDetailModal] = useState(null);
   const [payModal, setPayModal] = useState(null);
   const [payForm, setPayForm] = useState({ amount: "", date: "", file: null });
   const [editModal, setEditModal] = useState(null);
   const [editForm, setEditForm] = useState({});
+  const [completeModal, setCompleteModal] = useState(null); // модалка подтверждения "Выполнен"
   const PP = 30;
 
   const filtered = useMemo(() => {
@@ -798,47 +848,6 @@ const FinResults = ({ data, setData, pushLog }) => {
   const effectivePage = page === -1 ? Math.max(0, pages - 1) : page;
   const slice = filtered.slice(effectivePage * PP, (effectivePage + 1) * PP);
 
-  const doUpd = () => {
-    if (!updModal) return;
-    // Если "Без участия GS" — файл не нужен, иначе обязателен
-    if (!updForm.noGS && !updForm.file) return;
-
-    const applyUpdate = (fileData) => {
-      pushLog({
-        type: "fin_upd",
-        id: updModal.id,
-        prev: { hasUpd: updModal.hasUpd, updNum: updModal.updNum, updDate: updModal.updDate, orderStatus: updModal.orderStatus, noGlobalSmart: updModal.noGlobalSmart },
-      });
-      if (updForm.noGS) {
-        setData((prev) =>
-          prev.map((r) =>
-            r.id === updModal.id
-              ? { ...r, hasUpd: true, noGlobalSmart: true, updNum: "Без участия GS", updDate: "", updFile: null, orderStatus: "Без участия GS" }
-              : r
-          )
-        );
-      } else {
-        setData((prev) =>
-          prev.map((r) =>
-            r.id === updModal.id
-              ? { ...r, hasUpd: true, noGlobalSmart: false, updNum: updForm.num, updDate: updForm.date, updFile: fileData, orderStatus: `УПД №${updForm.num} от ${updForm.date}` }
-              : r
-          )
-        );
-      }
-      setUpdModal(null);
-      setUpdForm({ num: "", date: "", file: null, noGS: false });
-    };
-
-    if (updForm.noGS) {
-      applyUpdate(null);
-    } else {
-      const reader = new FileReader();
-      reader.onload = (e) => applyUpdate(e.target.result);
-      reader.readAsDataURL(updForm.file);
-    }
-  };
-
   const doPayment = () => {
     if (!payModal || !payForm.file) return;
     const reader = new FileReader();
@@ -861,11 +870,34 @@ const FinResults = ({ data, setData, pushLog }) => {
     reader.readAsDataURL(payForm.file);
   };
 
-  const toggleStatus = (r) => {
+  // Kanban-статус: переход на «Выполнен» требует проверки
+  const handleFinStage = (r, newStatus) => {
+    if (newStatus === "completed") {
+      const hasUpdOrGS = r.hasUpd || r.noGlobalSmart;
+      const hasPay = parseFloat(r.paymentFact) > 0;
+      // Если заказ «без участия GS» — можно закрывать сразу
+      if (r.noGlobalSmart) {
+        pushLog({ type: "fin_status", id: r.id, prev: r.status });
+        setData((prev) => prev.map((x) => (x.id === r.id ? { ...x, status: "completed" } : x)));
+        return;
+      }
+      // Иначе — показываем модалку с проверкой условий
+      if (!hasUpdOrGS || !hasPay) {
+        setCompleteModal(r);
+        return;
+      }
+    }
     pushLog({ type: "fin_status", id: r.id, prev: r.status });
-    setData((prev) =>
-      prev.map((x) => (x.id === r.id ? { ...x, status: x.status === "active" ? "completed" : "active" } : x))
-    );
+    setData((prev) => prev.map((x) => (x.id === r.id ? { ...x, status: newStatus } : x)));
+  };
+
+  // confirmFinComplete больше не нужен — кнопка подтверждения заблокирована
+  // Оставляем для случая, когда оба условия выполнены (например через edit)
+  const confirmFinComplete = () => {
+    if (!completeModal) return;
+    pushLog({ type: "fin_status", id: completeModal.id, prev: completeModal.status });
+    setData((prev) => prev.map((x) => (x.id === completeModal.id ? { ...x, status: "completed" } : x)));
+    setCompleteModal(null);
   };
 
   const deleteOrder = (r) => {
@@ -892,13 +924,11 @@ const FinResults = ({ data, setData, pushLog }) => {
       comment: r.comment || "",
       type: r.type || "domestic",
       status: r.status || "active",
-      // УПД поля
+      // УПД поля (только чтение — приходят из Open PO)
       hasUpd: r.hasUpd || false,
       noGlobalSmart: r.noGlobalSmart || false,
       updNum: r.updNum || "",
       updDate: r.updDate || "",
-      updFile: r.updFile || null,
-      _newUpdFile: null, // новый файл УПД (если пользователь загружает)
       // Оплата поля
       paymentDoc: r.paymentDoc || null,
       paymentDate: r.paymentDate || "",
@@ -912,7 +942,7 @@ const FinResults = ({ data, setData, pushLog }) => {
     pushLog({ type: "fin_edit", id: editModal.id, prev: { ...editModal } });
 
     // Функция применения обновления
-    const applyUpdate = (newUpdFile, newPayDoc) => {
+    const applyUpdate = (newPayDoc) => {
       setData((prev) =>
         prev.map((x) =>
           x.id === editModal.id
@@ -922,7 +952,6 @@ const FinResults = ({ data, setData, pushLog }) => {
                 customerPo: editForm.customerPo,
                 orderDate: editForm.orderDate,
                 customerAmount: parseFloat(editForm.customerAmount) || 0,
-                orderStatus: editForm.noGlobalSmart ? "Без участия GS" : editForm.orderStatus,
                 paymentFact: parseFloat(editForm.paymentFact) || 0,
                 supplierPo: editForm.supplierPo,
                 supplierAmount: parseFloat(editForm.supplierAmount) || 0,
@@ -933,13 +962,6 @@ const FinResults = ({ data, setData, pushLog }) => {
                 deliveryCost: parseFloat(editForm.deliveryCost) || 0,
                 comment: editForm.comment,
                 type: editForm.type,
-                status: editForm.status,
-                // УПД
-                hasUpd: editForm.hasUpd,
-                noGlobalSmart: editForm.noGlobalSmart || false,
-                updNum: editForm.noGlobalSmart ? "Без участия GS" : (editForm.hasUpd ? editForm.updNum : ""),
-                updDate: editForm.noGlobalSmart ? "" : (editForm.hasUpd ? editForm.updDate : ""),
-                updFile: editForm.noGlobalSmart ? null : (editForm.hasUpd ? (newUpdFile || editForm.updFile) : null),
                 // Оплата
                 paymentDoc: newPayDoc || editForm.paymentDoc,
                 paymentDate: editForm.paymentDate,
@@ -950,34 +972,13 @@ const FinResults = ({ data, setData, pushLog }) => {
       setEditModal(null);
     };
 
-    // Читаем новые файлы, если загружены
-    const readFiles = [];
-    let resolvedUpdFile = null;
-    let resolvedPayDoc = null;
-
-    if (editForm._newUpdFile) {
-      readFiles.push(
-        new Promise((resolve) => {
-          const reader = new FileReader();
-          reader.onload = (e) => { resolvedUpdFile = e.target.result; resolve(); };
-          reader.readAsDataURL(editForm._newUpdFile);
-        })
-      );
-    }
+    // Читаем новый файл платёжки, если загружен
     if (editForm._newPayDoc) {
-      readFiles.push(
-        new Promise((resolve) => {
-          const reader = new FileReader();
-          reader.onload = (e) => { resolvedPayDoc = e.target.result; resolve(); };
-          reader.readAsDataURL(editForm._newPayDoc);
-        })
-      );
-    }
-
-    if (readFiles.length > 0) {
-      Promise.all(readFiles).then(() => applyUpdate(resolvedUpdFile, resolvedPayDoc));
+      const reader = new FileReader();
+      reader.onload = (e) => applyUpdate(e.target.result);
+      reader.readAsDataURL(editForm._newPayDoc);
     } else {
-      applyUpdate(null, null);
+      applyUpdate(null);
     }
   };
 
@@ -1057,7 +1058,7 @@ const FinResults = ({ data, setData, pushLog }) => {
                 <tr
                   key={r.id}
                   className={`border-b border-gray-200 hover:bg-blue-50 cursor-pointer transition-colors ${
-                    r.orderStage === "cancelled" || r.status === "cancelled" ? "bg-red-200" : r.orderStage === "done" || r.status === "completed" ? "bg-green-200" : idx % 2 === 1 ? "bg-gray-50" : ""
+                    r.status === "cancelled" ? "bg-red-200" : r.status === "completed" ? "bg-green-200" : idx % 2 === 1 ? "bg-gray-50" : ""
                   }`}
                   onClick={() => setDetailModal(r)}
                 >
@@ -1077,13 +1078,7 @@ const FinResults = ({ data, setData, pushLog }) => {
                         <div className="text-emerald-500 text-[10px] mt-0.5">от {r.updDate || "—"}</div>
                       </div>
                     ) : (
-                      <button
-                        onClick={(e) => { e.stopPropagation(); setUpdModal(r); }}
-                        className="text-[#1E3A5F] hover:text-blue-700 text-xs font-medium"
-                        title="Загрузить УПД"
-                      >
-                        📄 Добавить
-                      </button>
+                      <span className="text-gray-400 text-xs">—</span>
                     )}
                   </td>
                   <td className="py-2.5 px-2 text-right">
@@ -1105,7 +1100,9 @@ const FinResults = ({ data, setData, pushLog }) => {
                   <td className="py-2.5 px-2 text-right text-gray-700 font-mono text-xs">{r.supplierAmount ? "$" + fmt(r.supplierAmount) : "—"}</td>
                   <td className="py-2.5 px-2 text-gray-700 text-xs max-w-[120px] truncate">{r.supplier}</td>
                   <td className="py-2.5 px-2 text-gray-600 text-xs max-w-[80px] truncate">{r.finalBuyer || "—"}</td>
-                  <td className="py-2.5 px-2"><StatusBadge status={r.status} /></td>
+                  <td className="py-2.5 px-2" onClick={(e) => e.stopPropagation()}>
+                    <FinStatusDropdown order={r} onChangeStatus={handleFinStage} />
+                  </td>
                   <td className="py-2.5 px-2">
                     <div className="flex items-center gap-1">
                       <button
@@ -1154,31 +1151,64 @@ const FinResults = ({ data, setData, pushLog }) => {
         </div>
       )}
 
-      {/* Модал загрузки УПД */}
-      <Modal isOpen={!!updModal} onClose={() => setUpdModal(null)} title={`Загрузка УПД — ${updModal?.customer || ""}`}>
-        <div className="space-y-4">
-          <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 text-blue-300 text-sm">
-            Логист загружает скан УПД. Система автоматически внесёт номер и дату.
-          </div>
-          <InputField label="Номер УПД *" value={updForm.num} onChange={(v) => setUpdForm({ ...updForm, num: v })} placeholder="Напр.: 153" disabled={updForm.noGS} />
-          <InputField label="Дата УПД *" value={updForm.date} onChange={(v) => setUpdForm({ ...updForm, date: v })} type="date" disabled={updForm.noGS} />
-          <div>
-            <label className={`text-xs text-slate-400 mb-1 block ${updForm.noGS ? "opacity-40" : ""}`}>Скан УПД (PDF/JPG/PNG) *</label>
-            <input type="file" accept=".pdf,.jpg,.jpeg,.png" onChange={(e) => setUpdForm({ ...updForm, file: e.target.files[0] })} className={`w-full text-sm text-slate-300 ${updForm.noGS ? "opacity-40" : ""}`} disabled={updForm.noGS} />
-          </div>
-          <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
-            <input type="checkbox" checked={updForm.noGS} onChange={(e) => setUpdForm({ ...updForm, noGS: e.target.checked, ...(e.target.checked ? { num: "", date: "", file: null } : {}) })}
-              className="accent-blue-500 w-4 h-4 rounded" />
-            Заказ без участия Global Smart
-          </label>
-          <div className="flex justify-end gap-3">
-            <button onClick={() => setUpdModal(null)} className="px-4 py-2 text-slate-400 hover:text-white text-sm">Отмена</button>
-            <button onClick={doUpd} disabled={!updForm.noGS && (!updForm.file || !updForm.num || !updForm.date)} className="px-6 py-2 bg-blue-500 hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors">
-              {updForm.noGS ? "Подтвердить" : "Загрузить"}
-            </button>
-        </div>
-      </div>
-    </Modal>
+      {/* Модал подтверждения «Выполнен» */}
+      <Modal isOpen={!!completeModal} onClose={() => setCompleteModal(null)} title={`Подтверждение — ${completeModal?.customerPo || ""}`}>
+        {completeModal && (() => {
+          const hasUpdOrGS = completeModal.hasUpd || completeModal.noGlobalSmart;
+          const hasPay = parseFloat(completeModal.paymentFact) > 0;
+          return (
+            <div className="space-y-4">
+              <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-amber-300 text-sm">
+                Для перевода заказа в статус «Выполнен» должны быть выполнены оба условия:
+              </div>
+              <div className="space-y-3">
+                <div className={`flex items-center gap-3 p-3 rounded-lg border ${hasUpdOrGS ? "border-emerald-500/30 bg-emerald-500/5" : "border-red-500/30 bg-red-500/5"}`}>
+                  <div className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 ${hasUpdOrGS ? "bg-emerald-500" : "bg-red-500/30"}`}>
+                    {hasUpdOrGS ? <span className="text-white text-xs">✓</span> : <span className="text-red-400 text-xs">✕</span>}
+                  </div>
+                  <div>
+                    <div className={`text-sm font-medium ${hasUpdOrGS ? "text-emerald-300" : "text-red-300"}`}>
+                      {completeModal.noGlobalSmart ? "Заказ без участия GS" : "УПД загружена"}
+                    </div>
+                    <div className="text-[10px] text-slate-500 mt-0.5">
+                      {hasUpdOrGS
+                        ? (completeModal.noGlobalSmart ? "🔹 Без участия GS" : `✅ УПД №${completeModal.updNum} от ${completeModal.updDate}`)
+                        : "УПД подгружается автоматически из Open PO"}
+                    </div>
+                  </div>
+                </div>
+                <div className={`flex items-center gap-3 p-3 rounded-lg border ${hasPay ? "border-emerald-500/30 bg-emerald-500/5" : "border-red-500/30 bg-red-500/5"}`}>
+                  <div className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 ${hasPay ? "bg-emerald-500" : "bg-red-500/30"}`}>
+                    {hasPay ? <span className="text-white text-xs">✓</span> : <span className="text-red-400 text-xs">✕</span>}
+                  </div>
+                  <div>
+                    <div className={`text-sm font-medium ${hasPay ? "text-emerald-300" : "text-red-300"}`}>
+                      Оплата получена
+                    </div>
+                    <div className="text-[10px] text-slate-500 mt-0.5">
+                      {hasPay ? `₽${fmt(completeModal.paymentFact)}` : "Оплата от клиента ещё не внесена"}
+                    </div>
+                  </div>
+                </div>
+              </div>
+              {(!hasUpdOrGS || !hasPay) && (
+                <div className="bg-rose-500/10 border border-rose-500/20 rounded-lg p-3 text-rose-300 text-xs">
+                  ⛔ Невозможно закрыть заказ. Для перевода в «Выполнен» необходимы оба условия:
+                  {!hasUpdOrGS && <div className="mt-1">• УПД должна быть загружена в Open PO</div>}
+                  {!hasPay && <div className="mt-1">• Оплата от клиента должна быть внесена</div>}
+                </div>
+              )}
+              <div className="flex justify-end gap-3">
+                <button onClick={() => setCompleteModal(null)} className="px-4 py-2 text-slate-400 hover:text-white text-sm">Закрыть</button>
+                <button onClick={confirmFinComplete} disabled={!hasUpdOrGS || !hasPay}
+                  className="px-6 py-2 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors">
+                  ✅ Подтвердить «Выполнен»
+                </button>
+              </div>
+            </div>
+          );
+        })()}
+      </Modal>
 
       {/* Модал внесения оплаты — только с платёжкой из банка */}
       <Modal isOpen={!!payModal} onClose={() => setPayModal(null)} title={`Внесение оплаты — ${payModal?.customer || ""}`}>
@@ -1280,79 +1310,26 @@ const FinResults = ({ data, setData, pushLog }) => {
                 </div>
                 <div>
                   <label className="text-xs text-slate-400 mb-1 block">Статус</label>
-                  <select value={editForm.status} onChange={(e) => setEditForm({ ...editForm, status: e.target.value })}
-                    className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white">
-                    <option value="active">В работе</option>
-                    <option value="completed">Выполнен</option>
-                    <option value="cancelled">Отменён</option>
-                  </select>
+                  <div className="w-full px-3 py-2 bg-slate-700/30 border border-slate-600 rounded-lg text-sm text-slate-400 italic">
+                    {editForm.status === "completed" ? "✅ Выполнен" : "🔵 В работе"}
+                    <span className="text-[10px] block mt-0.5 text-slate-500">Статус меняется через канбан в таблице</span>
+                  </div>
                 </div>
               </div>
             </div>
 
-            {/* Секция УПД */}
-            <div className={`border rounded-lg p-3 ${editForm.noGlobalSmart ? "border-blue-500/30 bg-blue-500/5" : editForm.hasUpd ? "border-emerald-500/30 bg-emerald-500/5" : "border-slate-600/50"}`}>
-              <div className="flex items-center justify-between mb-3">
-                <h4 className="text-xs text-slate-400 uppercase tracking-wider font-semibold">📄 УПД (универсальный передаточный документ)</h4>
-                <div className="flex items-center gap-4">
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" checked={editForm.noGlobalSmart}
-                      onChange={(e) => setEditForm({ ...editForm, noGlobalSmart: e.target.checked, ...(e.target.checked ? { hasUpd: true, updNum: "Без участия GS", updDate: "", updFile: null, _newUpdFile: null, orderStatus: "Без участия GS" } : { hasUpd: false, updNum: "", updDate: "", updFile: null, _newUpdFile: null, orderStatus: "" }) })}
-                      className="w-4 h-4 rounded border-slate-600 text-blue-500 focus:ring-blue-500/30" />
-                    <span className="text-xs text-slate-300">Без участия GS</span>
-                  </label>
-                  {!editForm.noGlobalSmart && (
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input type="checkbox" checked={editForm.hasUpd && !editForm.noGlobalSmart}
-                        onChange={(e) => setEditForm({ ...editForm, hasUpd: e.target.checked, ...(!e.target.checked ? { updNum: "", updDate: "", updFile: null, _newUpdFile: null } : {}) })}
-                        className="w-4 h-4 rounded border-slate-600 text-emerald-500 focus:ring-emerald-500/30" />
-                      <span className="text-xs text-slate-300">УПД загружена</span>
-                    </label>
-                  )}
-                </div>
+            {/* Информация УПД (только чтение — подгружается из Open PO) */}
+            {(editForm.hasUpd || editForm.noGlobalSmart) && (
+              <div className={`border rounded-lg p-3 ${editForm.noGlobalSmart ? "border-blue-500/30 bg-blue-500/5" : "border-emerald-500/30 bg-emerald-500/5"}`}>
+                <h4 className="text-xs text-slate-400 uppercase tracking-wider font-semibold mb-2">📄 УПД (из Open PO)</h4>
+                {editForm.noGlobalSmart ? (
+                  <div className="text-blue-300 text-sm">🔹 Заказ без участия Global Smart</div>
+                ) : (
+                  <div className="text-emerald-300 text-sm">✅ УПД №{editForm.updNum || "—"} от {editForm.updDate || "—"}</div>
+                )}
+                <div className="text-[10px] text-slate-500 mt-1">УПД подгружается автоматически из Open PO и не редактируется здесь</div>
               </div>
-              {editForm.noGlobalSmart ? (
-                <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 text-blue-300 text-sm">
-                  🔹 Заказ отмечен как «Без участия Global Smart». Вместо УПД будет отображена эта пометка.
-                </div>
-              ) : editForm.hasUpd ? (
-                <div className="space-y-3">
-                  <div className="grid grid-cols-2 gap-3">
-                    <InputField label="Номер УПД" value={editForm.updNum} onChange={(v) => setEditForm({ ...editForm, updNum: v })} />
-                    <InputField label="Дата УПД" value={editForm.updDate} onChange={(v) => setEditForm({ ...editForm, updDate: v })} />
-                  </div>
-                  <InputField label="Статус заказа / УПД (текст)" value={editForm.orderStatus} onChange={(v) => setEditForm({ ...editForm, orderStatus: v })} />
-                  <div>
-                    <label className="text-xs text-slate-400 mb-1 block">Файл скана УПД</label>
-                    {editForm.updFile && !editForm._newUpdFile && (
-                      <div className="flex items-center gap-2 mb-2">
-                        <span className="text-xs text-emerald-400">✅ Файл загружен</span>
-                        <button onClick={() => setEditForm({ ...editForm, updFile: null })} className="text-xs text-rose-400 hover:text-rose-300">✕ Удалить</button>
-                      </div>
-                    )}
-                    {editForm._newUpdFile && (
-                      <div className="flex items-center gap-2 mb-2">
-                        <span className="text-xs text-blue-400">📎 {editForm._newUpdFile.name}</span>
-                        <button onClick={() => setEditForm({ ...editForm, _newUpdFile: null })} className="text-xs text-rose-400 hover:text-rose-300">✕</button>
-                      </div>
-                    )}
-                    <input type="file" accept=".pdf,.jpg,.jpeg,.png" onChange={(e) => setEditForm({ ...editForm, _newUpdFile: e.target.files[0] || null })}
-                      className="w-full text-xs text-slate-400 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-medium file:bg-emerald-500/20 file:text-emerald-300 hover:file:bg-emerald-500/30 file:cursor-pointer" />
-                  </div>
-                  <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-2 text-xs text-amber-300">
-                    ⚠ При наличии УПД без оплаты заказ автоматически попадает в дебиторскую задолженность
-                  </div>
-                </div>
-              ) : (
-                <div className="text-xs text-slate-500 italic">УПД не загружена. Включите чекбокс, чтобы добавить УПД.</div>
-              )}
-              {editForm.hasUpd && !editForm.noGlobalSmart && (
-                <button onClick={() => setEditForm({ ...editForm, hasUpd: false, noGlobalSmart: false, updNum: "", updDate: "", updFile: null, _newUpdFile: null, orderStatus: "" })}
-                  className="mt-3 px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 rounded-lg text-xs font-medium border border-rose-500/30 transition-colors">
-                  🗑 Удалить УПД (заказ уйдёт из дебиторки)
-                </button>
-              )}
-            </div>
+            )}
 
             {/* Секция оплаты */}
             <div className={`border rounded-lg p-3 ${editForm.paymentFact > 0 ? "border-blue-500/30 bg-blue-500/5" : "border-slate-600/50"}`}>
@@ -1908,6 +1885,39 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
     }
     delete assembled.externalOrders;
     setData([...data, assembled]);
+
+    // Авто-создание записи в Фин. результат
+    if (setFinResults) {
+      const activeExts = exts.filter((e) => !e.cancelled);
+      const finEntry = {
+        id: Date.now(),
+        customer: newPO.customer || "",
+        customerPo: newPO.internalPo || "",
+        orderDate: newPO.dateOrdered || "",
+        customerAmount: parseFloat(newPO.customerAmount) || 0,
+        orderStatus: "",
+        paymentFact: 0,
+        supplierPo: activeExts.map((e) => e.po).join(", "),
+        supplierAmount: activeExts.reduce((s, e) => s + (parseFloat(e.supplierAmount) || 0), 0),
+        supplier: activeExts.map((e) => e.supplier).filter(Boolean).join(", "),
+        finalBuyer: activeExts.map((e) => e.payingCompany).filter(Boolean)[0] || "",
+        finAgent: "",
+        customsCost: 0,
+        deliveryCost: 0,
+        comment: "",
+        type: newPO.type || "domestic",
+        status: "active",
+        hasUpd: false,
+        noGlobalSmart: false,
+        updNum: "",
+        updDate: "",
+        updFile: null,
+        paymentDoc: null,
+        paymentDate: "",
+      };
+      setFinResults((prev) => [...prev, finEntry]);
+    }
+
     setShowAdd(false);
     setNewPO({
       customer: "", respSales: "", internalPo: "", dateOrdered: new Date().toISOString().split("T")[0],
