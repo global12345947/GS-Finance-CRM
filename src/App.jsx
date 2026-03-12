@@ -33,6 +33,7 @@ const ORDER_STAGES = [
   { key: "payment", label: "Заказ в Оплате", color: "bg-rose-400", text: "text-rose-900", light: "bg-rose-100", border: "border-rose-400" },
   { key: "logistics", label: "Заказ в Логистике", color: "bg-violet-400", text: "text-violet-900", light: "bg-violet-100", border: "border-violet-400" },
   { key: "done", label: "Заказ завершен", color: "bg-emerald-500", text: "text-emerald-900", light: "bg-emerald-100", border: "border-emerald-500" },
+  { key: "cancelled", label: "Заказ отменен", color: "bg-red-500", text: "text-red-900", light: "bg-red-100", border: "border-red-500" },
 ];
 
 const KanbanDropdown = ({ order, setData, pushLog }) => {
@@ -48,12 +49,14 @@ const KanbanDropdown = ({ order, setData, pushLog }) => {
   }, [open]);
 
   const currentStage = ORDER_STAGES.find((s) => s.key === order.orderStage) || null;
-  const currentIdx = currentStage ? ORDER_STAGES.indexOf(currentStage) : -1;
+  const mainStages = ORDER_STAGES.filter((s) => s.key !== "cancelled");
+  const currentIdx = currentStage && currentStage.key !== "cancelled" ? mainStages.indexOf(currentStage) : -1;
 
   const selectStage = (stage) => {
     if (stage.key === order.orderStage) { setOpen(false); return; }
-    pushLog({ type: "po_stage", id: order.id, prev: order.orderStage || "" });
-    setData((prev) => prev.map((r) => (r.id === order.id ? { ...r, orderStage: stage.key } : r)));
+    pushLog({ type: "po_stage", id: order.id, prev: order.orderStage || "", prevStatus: order.status || "active" });
+    const newStatus = stage.key === "done" ? "completed" : stage.key === "cancelled" ? "cancelled" : "active";
+    setData((prev) => prev.map((r) => (r.id === order.id ? { ...r, orderStage: stage.key, status: newStatus } : r)));
     setOpen(false);
   };
 
@@ -70,17 +73,17 @@ const KanbanDropdown = ({ order, setData, pushLog }) => {
         <div className="absolute z-50 top-full mt-1 left-0 bg-white rounded-xl shadow-2xl border border-gray-200 p-2 min-w-[420px]"
           onClick={(e) => e.stopPropagation()}>
           <div className="text-[10px] text-gray-400 font-medium uppercase tracking-wider mb-2 px-1">Стадия заказа</div>
-          {/* Прогресс-бар */}
+          {/* Прогресс-бар (без "Отменен") */}
           <div className="flex gap-0.5 mb-3 px-1">
-            {ORDER_STAGES.map((s, i) => (
-              <div key={s.key} className={`h-1.5 flex-1 rounded-full transition-all ${i <= currentIdx ? s.color : "bg-gray-200"}`} />
+            {mainStages.map((s, i) => (
+              <div key={s.key} className={`h-1.5 flex-1 rounded-full transition-all ${order.orderStage !== "cancelled" && i <= currentIdx ? s.color : "bg-gray-200"}`} />
             ))}
           </div>
-          {/* Стадии */}
+          {/* Основные стадии */}
           <div className="flex flex-col gap-1">
-            {ORDER_STAGES.map((s, i) => {
+            {mainStages.map((s, i) => {
               const isActive = s.key === order.orderStage;
-              const isPast = i < currentIdx;
+              const isPast = order.orderStage !== "cancelled" && i < currentIdx;
               return (
                 <button key={s.key} onClick={() => selectStage(s)}
                   className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-all text-left ${
@@ -96,6 +99,25 @@ const KanbanDropdown = ({ order, setData, pushLog }) => {
                 </button>
               );
             })}
+            {/* Разделитель */}
+            <div className="border-t border-gray-200 my-1"></div>
+            {/* Отмена — отдельно */}
+            {(() => {
+              const s = ORDER_STAGES.find((x) => x.key === "cancelled");
+              const isActive = order.orderStage === "cancelled";
+              return (
+                <button onClick={() => selectStage(s)}
+                  className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-all text-left ${
+                    isActive ? `${s.light} ${s.text} ring-2 ${s.border} ring-offset-1` : "hover:bg-red-50 text-gray-700"
+                  }`}>
+                  <div className={`w-3 h-3 rounded-full flex-shrink-0 ${isActive ? s.color : "border-2 border-red-300"}`}>
+                    {isActive && <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd"/></svg>}
+                  </div>
+                  <span className="flex-1">{s.label}</span>
+                  {isActive && <span className="text-[9px] font-bold uppercase tracking-wider opacity-60">Текущая</span>}
+                </button>
+              );
+            })()}
           </div>
         </div>
       )}
@@ -822,7 +844,7 @@ const FinResults = ({ data, setData, pushLog }) => {
                 <tr
                   key={r.id}
                   className={`border-b border-gray-200 hover:bg-blue-50 cursor-pointer transition-colors ${
-                    r.status === "cancelled" ? "bg-red-200" : r.status === "completed" ? "bg-green-200" : idx % 2 === 1 ? "bg-gray-50" : ""
+                    r.orderStage === "cancelled" || r.status === "cancelled" ? "bg-red-200" : r.orderStage === "done" || r.status === "completed" ? "bg-green-200" : idx % 2 === 1 ? "bg-gray-50" : ""
                   }`}
                   onClick={() => setDetailModal(r)}
                 >
@@ -875,13 +897,6 @@ const FinResults = ({ data, setData, pushLog }) => {
                         title="Редактировать заказ"
                       >
                         ✏️
-                      </button>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); toggleStatus(r); }}
-                        className="text-[#1E3A5F] hover:text-blue-700 text-xs transition-colors font-bold"
-                        title={r.status === "active" ? "Отметить выполненным" : "Вернуть в активные"}
-                      >
-                        {r.status === "active" ? "✓" : "↩"}
                       </button>
                     </div>
                   </td>
@@ -1644,7 +1659,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                   <tr
                     onClick={() => setDetailModal(o)}
                     className={`border-b border-gray-200 hover:bg-blue-50 cursor-pointer transition-colors ${
-                      o.status === "cancelled" ? "bg-red-200" : o.status === "completed" ? "bg-green-200" : idx % 2 === 1 ? "bg-gray-50" : ""
+                      o.orderStage === "cancelled" || o.status === "cancelled" ? "bg-red-200" : o.orderStage === "done" || o.status === "completed" ? "bg-green-200" : idx % 2 === 1 ? "bg-gray-50" : ""
                     }`}>
                     {/* Кнопка раскрытия логистической панели */}
                     <td className="py-2 px-1 text-center" onClick={(e) => e.stopPropagation()}>
@@ -1716,11 +1731,6 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                     <td className="py-2 px-2 text-center" onClick={(e) => e.stopPropagation()}>
                       <div className="flex items-center justify-center gap-1">
                         <button onClick={() => startEdit(o)} className="p-1 hover:bg-gray-200 rounded" title="Редактировать">✏️</button>
-                        {o.status === "active" && <>
-                          <button onClick={() => completeOrder(o)} className="p-1 hover:bg-green-100 rounded text-green-600" title="Выполнен">✓</button>
-                          <button onClick={() => setCancelModal(o)} className="p-1 hover:bg-red-100 rounded text-red-600" title="Отменить">✕</button>
-                        </>}
-                        {o.status !== "active" && <button onClick={() => restoreOrder(o)} className="p-1 hover:bg-blue-100 rounded text-blue-600" title="Вернуть">↩</button>}
                         {!o.hasUpd && o.status === "active" && <button onClick={() => setUpdModal(o)} className="p-1 hover:bg-blue-100 rounded text-blue-600" title="Загрузить УПД">📄</button>}
                       </div>
                     </td>
@@ -2396,7 +2406,10 @@ export default function App() {
   const [balances, setBalances] = useState(BALANCES_DATA);
   const [debts, setDebts] = useState(DEBTS_DATA);
   const [finResults, setFinResults] = useState(FIN_DATA);
-  const [openPo, setOpenPo] = useState(PO_DATA);
+  const [openPo, setOpenPo] = useState(() => PO_DATA.map((r) => ({
+    ...r,
+    orderStage: r.orderStage || (r.status === "completed" ? "done" : r.status === "cancelled" ? "cancelled" : "in_work"),
+  })));
   const [actionLog, setActionLog] = useState([]);
 
   const pushLog = useCallback((a) => setActionLog((prev) => [...prev, a]), []);
@@ -2413,7 +2426,7 @@ export default function App() {
     if (last.type === "po_edit") setOpenPo((prev) => prev.map((r) => (r.id === last.id ? { ...last.prev } : r)));
     if (last.type === "po_inline_edit") setOpenPo((prev) => prev.map((r) => (r.id === last.id ? { ...r, [last.field]: last.prev } : r)));
     if (last.type === "po_logistics") setOpenPo((prev) => prev.map((r) => (r.id === last.id ? { ...r, ...last.prev } : r)));
-    if (last.type === "po_stage") setOpenPo((prev) => prev.map((r) => (r.id === last.id ? { ...r, orderStage: last.prev } : r)));
+    if (last.type === "po_stage") setOpenPo((prev) => prev.map((r) => (r.id === last.id ? { ...r, orderStage: last.prev, status: last.prevStatus || "active" } : r)));
     if (last.type === "debt_close") setDebts((prev) => prev.map((d) => (d.id === last.id ? { ...d, ...last.prev } : d)));
     if (last.type === "infra_payment") setBalances((prev) => prev.map((b) => (b.name === last.accName ? { ...b, balance: last.prev } : b)));
     setActionLog((prev) => prev.slice(0, -1));
