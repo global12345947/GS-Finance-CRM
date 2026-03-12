@@ -1079,10 +1079,19 @@ const ExpandedLogisticsPanel = ({ order, setData, pushLog }) => {
   // Факт. стоимость: сначала отдельное поле, потом парсинг из deliveryCost
   const actualCost = order.deliveryActualCost || parsed.actual || "";
 
+  // Цвета миль
+  const milestoneColors = {
+    "": { bg: "bg-gray-100", text: "text-gray-500", border: "border-gray-300", label: "Не указана" },
+    "1": { bg: "bg-red-100", text: "text-red-800", border: "border-red-400", label: "Миля 1", dot: "bg-red-500" },
+    "2": { bg: "bg-orange-100", text: "text-orange-800", border: "border-orange-400", label: "Миля 2", dot: "bg-orange-500" },
+    "3": { bg: "bg-yellow-100", text: "text-yellow-800", border: "border-yellow-400", label: "Миля 3", dot: "bg-yellow-500" },
+    "4": { bg: "bg-emerald-100", text: "text-emerald-800", border: "border-emerald-400", label: "Миля 4", dot: "bg-emerald-500" },
+  };
+
   const startFieldEdit = (section) => {
     setEditing(section);
     if (section === "awb") {
-      setForm({ awb: order.awb || "" });
+      setForm({ awb: order.awb || "", milestone: order.milestone || "" });
     } else if (section === "delivery") {
       setForm({
         deliveryActualCost: actualCost,
@@ -1097,7 +1106,7 @@ const ExpandedLogisticsPanel = ({ order, setData, pushLog }) => {
   const saveFieldEdit = () => {
     if (!editing) return;
     pushLog({ type: "po_logistics", id: order.id, section: editing, prev: {
-      awb: order.awb, deliveryActualCost: order.deliveryActualCost,
+      awb: order.awb, milestone: order.milestone, deliveryActualCost: order.deliveryActualCost,
       termsDelivery: order.termsDelivery, deliveryVat: order.deliveryVat,
       comments: order.comments, deliveryCost: order.deliveryCost,
     }});
@@ -1121,7 +1130,7 @@ const ExpandedLogisticsPanel = ({ order, setData, pushLog }) => {
     <div className="px-4 py-3 border-l-4 border-[#1E3A5F]">
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
 
-        {/* ✈️ AWB / Накладные */}
+        {/* ✈️ AWB / Накладные + Миля */}
         <div className="bg-white rounded-lg border border-gray-200 p-3">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-1.5">
@@ -1138,11 +1147,42 @@ const ExpandedLogisticsPanel = ({ order, setData, pushLog }) => {
             )}
           </div>
           {editing === "awb" ? (
-            <textarea value={form.awb || ""} onChange={(e) => setForm({ ...form, awb: e.target.value })}
-              className={`${inputCls} h-16 resize-none`} placeholder="Номера накладных, FX, TL..." autoFocus />
+            <div className="space-y-2">
+              <textarea value={form.awb || ""} onChange={(e) => setForm({ ...form, awb: e.target.value })}
+                className={`${inputCls} h-16 resize-none`} placeholder="Номера накладных, FX, TL..." autoFocus />
+              <div>
+                <label className={labelCls}>Миля</label>
+                <div className="flex gap-1.5">
+                  {["1", "2", "3", "4"].map((m) => {
+                    const mc = milestoneColors[m];
+                    const isActive = form.milestone === m;
+                    return (
+                      <button key={m} onClick={() => setForm({ ...form, milestone: isActive ? "" : m })}
+                        className={`flex-1 px-2 py-1.5 rounded-md text-xs font-bold border-2 transition-all ${
+                          isActive ? `${mc.bg} ${mc.text} ${mc.border} ring-2 ring-offset-1 ring-${m === "1" ? "red" : m === "2" ? "orange" : m === "3" ? "yellow" : "emerald"}-300` 
+                                   : "bg-gray-50 text-gray-400 border-gray-200 hover:bg-gray-100"
+                        }`}>
+                        {m}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
           ) : (
-            <div className="text-xs text-gray-700 whitespace-pre-wrap break-all max-h-20 overflow-y-auto">
-              {order.awb || <span className="text-gray-400 italic">Не указано — нажмите «Изменить»</span>}
+            <div className="space-y-2">
+              <div className="text-xs text-gray-700 whitespace-pre-wrap break-all max-h-20 overflow-y-auto">
+                {order.awb || <span className="text-gray-400 italic">Не указано — нажмите «Изменить»</span>}
+              </div>
+              {/* Индикатор мили */}
+              {order.milestone ? (
+                <div className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold ${milestoneColors[order.milestone]?.bg} ${milestoneColors[order.milestone]?.text} border ${milestoneColors[order.milestone]?.border}`}>
+                  <span className={`w-2 h-2 rounded-full ${milestoneColors[order.milestone]?.dot}`}></span>
+                  {milestoneColors[order.milestone]?.label}
+                </div>
+              ) : (
+                <span className="text-[10px] text-gray-400 italic">Миля не указана</span>
+              )}
             </div>
           )}
         </div>
