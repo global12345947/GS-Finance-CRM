@@ -36,9 +36,13 @@ const ORDER_STAGES = [
   { key: "cancelled", label: "Заказ отменен", color: "bg-red-500", text: "text-red-900", light: "bg-red-100", border: "border-red-500" },
 ];
 
-const KanbanDropdown = ({ order, setData, pushLog }) => {
+const KanbanDropdown = ({ order, setData, pushLog, syncUpdToFinResults }) => {
   const [open, setOpen] = useState(false);
   const [openUp, setOpenUp] = useState(false);
+  const [completeModal, setCompleteModal] = useState(false);
+  const [cancelModal, setCancelModal] = useState(false);
+  const [cancelReasonText, setCancelReasonText] = useState("");
+  const [updForm, setUpdForm] = useState({ updNum: "", updDate: "", updFile: null, noGS: false });
   const ref = React.useRef(null);
 
   // Закрыть при клике вне
@@ -55,11 +59,66 @@ const KanbanDropdown = ({ order, setData, pushLog }) => {
 
   const selectStage = (stage) => {
     if (stage.key === order.orderStage) { setOpen(false); return; }
+    // Если «Заказ завершен» — показать модалку с УПД
+    if (stage.key === "done" && !order.hasUpd) {
+      setOpen(false);
+      setUpdForm({ updNum: "", updDate: "", updFile: null, noGS: false });
+      setCompleteModal(true);
+      return;
+    }
+    // Если «Заказ отменен» — запросить причину отмены
+    if (stage.key === "cancelled") {
+      setOpen(false);
+      setCancelReasonText("");
+      setCancelModal(true);
+      return;
+    }
     pushLog({ type: "po_stage", id: order.id, prev: order.orderStage || "", prevStatus: order.status || "active" });
-    const newStatus = stage.key === "done" ? "completed" : stage.key === "cancelled" ? "cancelled" : "active";
+    const newStatus = stage.key === "done" ? "completed" : "active";
     setData((prev) => prev.map((r) => (r.id === order.id ? { ...r, orderStage: stage.key, status: newStatus } : r)));
     setOpen(false);
   };
+
+  const confirmCancel = () => {
+    if (!cancelReasonText.trim()) return;
+    pushLog({ type: "po_stage", id: order.id, prev: order.orderStage || "", prevStatus: order.status || "active", prevComments: order.comments });
+    const dateStr = new Date().toLocaleDateString("ru-RU");
+    const cancelComment = `[${dateStr}] ОТМЕНА ЗАКАЗА: ${cancelReasonText.trim()}`;
+    setData((prev) => prev.map((r) => (r.id === order.id ? {
+      ...r, orderStage: "cancelled", status: "cancelled", cancelReason: cancelReasonText.trim(),
+      comments: r.comments ? `${r.comments}\n${cancelComment}` : cancelComment,
+    } : r)));
+    setCancelModal(false);
+    setCancelReasonText("");
+  };
+
+  const confirmComplete = () => {
+    const hasUpd = !!(updForm.updNum && updForm.updDate);
+    if (!hasUpd && !updForm.noGS) return; // нельзя завершить без УПД или галочки
+    pushLog({ type: "po_stage", id: order.id, prev: order.orderStage || "", prevStatus: order.status || "active" });
+    const updates = { orderStage: "done", status: "completed" };
+    if (hasUpd) {
+      updates.hasUpd = true;
+      updates.updNum = updForm.updNum;
+      updates.updDate = updForm.updDate;
+      updates.updFile = updForm.updFile;
+      updates.noGlobalSmart = false;
+    }
+    if (updForm.noGS) {
+      updates.noGlobalSmart = true;
+      updates.hasUpd = true; // помечаем как «завершён» для фильтров
+      updates.updNum = "Без участия GS";
+      updates.updDate = "";
+      updates.updFile = null;
+    }
+    setData((prev) => prev.map((r) => (r.id === order.id ? { ...r, ...updates } : r)));
+    if (syncUpdToFinResults) {
+      syncUpdToFinResults(order.internalPo, true, updates.updNum, updates.updDate, updates.updFile, updates.noGlobalSmart);
+    }
+    setCompleteModal(false);
+  };
+
+  const canComplete = !!(updForm.updNum && updForm.updDate) || updForm.noGS;
 
   const handleToggle = (e) => {
     e.stopPropagation();
@@ -133,6 +192,89 @@ const KanbanDropdown = ({ order, setData, pushLog }) => {
           </div>
         </div>
       )}
+
+      {/* Модалка завершения заказа — требуется УПД или галочка */}
+      {completeModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50" onClick={() => setCompleteModal(false)}>
+          <div className="bg-slate-800 rounded-2xl shadow-2xl border border-slate-700 p-6 w-[440px] max-w-[95vw]" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-bold text-white mb-1">✅ Завершение заказа</h3>
+            <p className="text-sm text-slate-400 mb-4">Для завершения заказа загрузите УПД или отметьте, что заказ без участия Global Smart</p>
+
+            <div className="space-y-3 mb-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-slate-400 mb-1 block">Номер УПД</label>
+                  <input type="text" value={updForm.updNum} onChange={(e) => setUpdForm({ ...updForm, updNum: e.target.value })}
+                    disabled={updForm.noGS}
+                    className={`w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500 ${updForm.noGS ? "opacity-40" : ""}`}
+                    placeholder="Напр.: 123" />
+                </div>
+                <div>
+                  <label className="text-xs text-slate-400 mb-1 block">Дата УПД</label>
+                  <input type="date" value={updForm.updDate} onChange={(e) => setUpdForm({ ...updForm, updDate: e.target.value })}
+                    disabled={updForm.noGS}
+                    className={`w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500 ${updForm.noGS ? "opacity-40" : ""}`} />
+                </div>
+              </div>
+              <div>
+                <label className="text-xs text-slate-400 mb-1 block">Скан УПД (PDF/JPG/PNG)</label>
+                <input type="file" accept=".pdf,.jpg,.jpeg,.png"
+                  disabled={updForm.noGS}
+                  onChange={(e) => {
+                    const file = e.target.files[0];
+                    if (!file) return;
+                    const reader = new FileReader();
+                    reader.onload = (ev) => setUpdForm((f) => ({ ...f, updFile: ev.target.result }));
+                    reader.readAsDataURL(file);
+                  }}
+                  className={`w-full text-xs text-slate-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:text-xs file:font-medium file:bg-blue-500 file:text-white file:cursor-pointer hover:file:bg-blue-600 ${updForm.noGS ? "opacity-40" : ""}`} />
+              </div>
+            </div>
+
+            <div className="border-t border-slate-700 pt-3 mb-4">
+              <label className="flex items-center gap-3 cursor-pointer p-2 rounded-lg hover:bg-slate-700/40 transition-colors">
+                <input type="checkbox" checked={updForm.noGS} onChange={(e) => setUpdForm({ ...updForm, noGS: e.target.checked, ...(e.target.checked ? { updNum: "", updDate: "", updFile: null } : {}) })}
+                  className="w-4 h-4 rounded border-slate-500 text-amber-500 focus:ring-amber-500/30" />
+                <div>
+                  <span className="text-sm text-amber-400 font-medium">Заказ без участия Global Smart</span>
+                  <p className="text-[10px] text-slate-500 mt-0.5">УПД не требуется для данного заказа</p>
+                </div>
+              </label>
+            </div>
+
+            <div className="flex justify-end gap-3">
+              <button onClick={() => setCompleteModal(false)} className="px-4 py-2 text-slate-400 hover:text-white text-sm transition-colors">Отмена</button>
+              <button onClick={confirmComplete} disabled={!canComplete}
+                className="px-6 py-2 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors">
+                Завершить заказ
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Модалка причины отмены заказа */}
+      {cancelModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50" onClick={() => setCancelModal(false)}>
+          <div className="bg-slate-800 rounded-2xl shadow-2xl border border-slate-700 p-6 w-[440px] max-w-[95vw]" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-bold text-white mb-1">⛔ Отмена заказа</h3>
+            <p className="text-sm text-slate-400 mb-4">Укажите причину отмены заказа <span className="font-mono text-white">{order.internalPo}</span>. Причина будет автоматически записана в комментарии.</p>
+            <div className="mb-4">
+              <label className="text-xs text-slate-400 mb-1 block">Причина отмены *</label>
+              <textarea value={cancelReasonText} onChange={(e) => setCancelReasonText(e.target.value)}
+                rows={3} placeholder="Опишите причину отмены заказа..."
+                className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white placeholder-slate-500 focus:outline-none focus:border-red-500 resize-none" />
+            </div>
+            <div className="flex justify-end gap-3">
+              <button onClick={() => setCancelModal(false)} className="px-4 py-2 text-slate-400 hover:text-white text-sm transition-colors">Назад</button>
+              <button onClick={confirmCancel} disabled={!cancelReasonText.trim()}
+                className="px-6 py-2 bg-red-500 hover:bg-red-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors">
+                Отменить заказ
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -145,6 +287,8 @@ const parseExternalPOs = (order) => {
   const payments = (order.paymentStatusSupplier || "").split("\n").map((s) => s.trim()).filter(Boolean);
   const payCompanies = (order.payingCompany || "").split("\n").map((s) => s.trim()).filter(Boolean);
   const amounts = (order.supplierAmounts || "").split("\n").map((s) => s.trim()).filter(Boolean);
+  const datesPlaced = (order.datePlacedSupplier || "").split("\n").map((s) => s.trim()).filter(Boolean);
+  const procurements = (order.respProcurement || "").split("\n").map((s) => s.trim()).filter(Boolean);
   const count = Math.max(refs.length, 1);
   const result = [];
   for (let i = 0; i < count; i++) {
@@ -156,7 +300,10 @@ const parseExternalPOs = (order) => {
       payment: payments[i] || (payments.length === 1 ? payments[0] : ""),
       payingCompany: payCompanies[i] || (payCompanies.length === 1 ? payCompanies[0] : ""),
       supplierAmount: amounts[i] || "",
+      datePlaced: datesPlaced[i] || (datesPlaced.length === 1 ? datesPlaced[0] : ""),
+      respProcurement: procurements[i] || (procurements.length === 1 ? procurements[0] : ""),
       cancelled,
+      cancelReason: "",
     });
   }
   return result;
@@ -194,6 +341,7 @@ const getAutoDebts = (finResults, existingDebts) => {
       // Есть УПД, но нет оплаты, и заказ не отменён
       if (!r.hasUpd) return false;
       if (r.status === "cancelled") return false;
+      if (r.noGlobalSmart) return false; // без участия GS — не дебиторка
       const pf = typeof r.paymentFact === "number" ? r.paymentFact : parseFloat(r.paymentFact) || 0;
       if (pf > 0) return false;
       // Не дублировать с ручными долгами
@@ -323,15 +471,16 @@ const Modal = ({ isOpen, onClose, title, children, wide }) => {
   );
 };
 
-const InputField = ({ label, value, onChange, type = "text", placeholder = "" }) => (
+const InputField = ({ label, value, onChange, type = "text", placeholder = "", disabled = false }) => (
   <div>
-    <label className="text-xs text-slate-400 mb-1 block">{label}</label>
+    <label className={`text-xs text-slate-400 mb-1 block ${disabled ? "opacity-40" : ""}`}>{label}</label>
     <input
       type={type}
       value={value || ""}
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
-      className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+      disabled={disabled}
+      className={`w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 ${disabled ? "opacity-40 cursor-not-allowed" : ""}`}
     />
   </div>
 );
@@ -612,7 +761,7 @@ const FinResults = ({ data, setData, pushLog }) => {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(-1); // -1 = auto-last-page
   const [updModal, setUpdModal] = useState(null);
-  const [updForm, setUpdForm] = useState({ num: "", date: "", file: null });
+  const [updForm, setUpdForm] = useState({ num: "", date: "", file: null, noGS: false });
   const [detailModal, setDetailModal] = useState(null);
   const [payModal, setPayModal] = useState(null);
   const [payForm, setPayForm] = useState({ amount: "", date: "", file: null });
@@ -650,25 +799,44 @@ const FinResults = ({ data, setData, pushLog }) => {
   const slice = filtered.slice(effectivePage * PP, (effectivePage + 1) * PP);
 
   const doUpd = () => {
-    if (!updModal || !updForm.file) return;
-    const reader = new FileReader();
-    reader.onload = (e) => {
+    if (!updModal) return;
+    // Если "Без участия GS" — файл не нужен, иначе обязателен
+    if (!updForm.noGS && !updForm.file) return;
+
+    const applyUpdate = (fileData) => {
       pushLog({
         type: "fin_upd",
         id: updModal.id,
-        prev: { hasUpd: updModal.hasUpd, updNum: updModal.updNum, updDate: updModal.updDate, orderStatus: updModal.orderStatus },
+        prev: { hasUpd: updModal.hasUpd, updNum: updModal.updNum, updDate: updModal.updDate, orderStatus: updModal.orderStatus, noGlobalSmart: updModal.noGlobalSmart },
       });
-      setData((prev) =>
-        prev.map((r) =>
-          r.id === updModal.id
-            ? { ...r, hasUpd: true, updNum: updForm.num, updDate: updForm.date, updFile: e.target.result, orderStatus: `УПД №${updForm.num} от ${updForm.date}` }
-            : r
-        )
-      );
+      if (updForm.noGS) {
+        setData((prev) =>
+          prev.map((r) =>
+            r.id === updModal.id
+              ? { ...r, hasUpd: true, noGlobalSmart: true, updNum: "Без участия GS", updDate: "", updFile: null, orderStatus: "Без участия GS" }
+              : r
+          )
+        );
+      } else {
+        setData((prev) =>
+          prev.map((r) =>
+            r.id === updModal.id
+              ? { ...r, hasUpd: true, noGlobalSmart: false, updNum: updForm.num, updDate: updForm.date, updFile: fileData, orderStatus: `УПД №${updForm.num} от ${updForm.date}` }
+              : r
+          )
+        );
+      }
       setUpdModal(null);
-      setUpdForm({ num: "", date: "", file: null });
+      setUpdForm({ num: "", date: "", file: null, noGS: false });
     };
-    reader.readAsDataURL(updForm.file);
+
+    if (updForm.noGS) {
+      applyUpdate(null);
+    } else {
+      const reader = new FileReader();
+      reader.onload = (e) => applyUpdate(e.target.result);
+      reader.readAsDataURL(updForm.file);
+    }
   };
 
   const doPayment = () => {
@@ -726,6 +894,7 @@ const FinResults = ({ data, setData, pushLog }) => {
       status: r.status || "active",
       // УПД поля
       hasUpd: r.hasUpd || false,
+      noGlobalSmart: r.noGlobalSmart || false,
       updNum: r.updNum || "",
       updDate: r.updDate || "",
       updFile: r.updFile || null,
@@ -753,7 +922,7 @@ const FinResults = ({ data, setData, pushLog }) => {
                 customerPo: editForm.customerPo,
                 orderDate: editForm.orderDate,
                 customerAmount: parseFloat(editForm.customerAmount) || 0,
-                orderStatus: editForm.orderStatus,
+                orderStatus: editForm.noGlobalSmart ? "Без участия GS" : editForm.orderStatus,
                 paymentFact: parseFloat(editForm.paymentFact) || 0,
                 supplierPo: editForm.supplierPo,
                 supplierAmount: parseFloat(editForm.supplierAmount) || 0,
@@ -767,9 +936,10 @@ const FinResults = ({ data, setData, pushLog }) => {
                 status: editForm.status,
                 // УПД
                 hasUpd: editForm.hasUpd,
-                updNum: editForm.hasUpd ? editForm.updNum : "",
-                updDate: editForm.hasUpd ? editForm.updDate : "",
-                updFile: editForm.hasUpd ? (newUpdFile || editForm.updFile) : null,
+                noGlobalSmart: editForm.noGlobalSmart || false,
+                updNum: editForm.noGlobalSmart ? "Без участия GS" : (editForm.hasUpd ? editForm.updNum : ""),
+                updDate: editForm.noGlobalSmart ? "" : (editForm.hasUpd ? editForm.updDate : ""),
+                updFile: editForm.noGlobalSmart ? null : (editForm.hasUpd ? (newUpdFile || editForm.updFile) : null),
                 // Оплата
                 paymentDoc: newPayDoc || editForm.paymentDoc,
                 paymentDate: editForm.paymentDate,
@@ -897,7 +1067,11 @@ const FinResults = ({ data, setData, pushLog }) => {
                   <td className="py-2.5 px-2 text-gray-600 text-xs whitespace-nowrap">{r.orderDate}</td>
                   <td className="py-2.5 px-2 text-right text-green-700 font-mono text-xs font-semibold">${fmt(r.customerAmount)}</td>
                   <td className="py-2.5 px-2">
-                    {r.hasUpd ? (
+                    {r.noGlobalSmart ? (
+                      <div className="text-blue-600 cursor-help text-xs leading-tight font-medium" title="Заказ без участия Global Smart">
+                        🔹 Без участия GS
+                      </div>
+                    ) : r.hasUpd ? (
                       <div title={r.orderStatus} className="text-emerald-600 cursor-help text-xs leading-tight">
                         <div>✅ УПД №{r.updNum || "—"}</div>
                         <div className="text-emerald-500 text-[10px] mt-0.5">от {r.updDate || "—"}</div>
@@ -986,16 +1160,21 @@ const FinResults = ({ data, setData, pushLog }) => {
           <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 text-blue-300 text-sm">
             Логист загружает скан УПД. Система автоматически внесёт номер и дату.
           </div>
-          <InputField label="Номер УПД *" value={updForm.num} onChange={(v) => setUpdForm({ ...updForm, num: v })} placeholder="Напр.: 153" />
-          <InputField label="Дата УПД *" value={updForm.date} onChange={(v) => setUpdForm({ ...updForm, date: v })} type="date" />
+          <InputField label="Номер УПД *" value={updForm.num} onChange={(v) => setUpdForm({ ...updForm, num: v })} placeholder="Напр.: 153" disabled={updForm.noGS} />
+          <InputField label="Дата УПД *" value={updForm.date} onChange={(v) => setUpdForm({ ...updForm, date: v })} type="date" disabled={updForm.noGS} />
           <div>
-            <label className="text-xs text-slate-400 mb-1 block">Скан УПД (PDF/JPG/PNG) *</label>
-            <input type="file" accept=".pdf,.jpg,.jpeg,.png" onChange={(e) => setUpdForm({ ...updForm, file: e.target.files[0] })} className="w-full text-sm text-slate-300" />
+            <label className={`text-xs text-slate-400 mb-1 block ${updForm.noGS ? "opacity-40" : ""}`}>Скан УПД (PDF/JPG/PNG) *</label>
+            <input type="file" accept=".pdf,.jpg,.jpeg,.png" onChange={(e) => setUpdForm({ ...updForm, file: e.target.files[0] })} className={`w-full text-sm text-slate-300 ${updForm.noGS ? "opacity-40" : ""}`} disabled={updForm.noGS} />
           </div>
+          <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
+            <input type="checkbox" checked={updForm.noGS} onChange={(e) => setUpdForm({ ...updForm, noGS: e.target.checked, ...(e.target.checked ? { num: "", date: "", file: null } : {}) })}
+              className="accent-blue-500 w-4 h-4 rounded" />
+            Заказ без участия Global Smart
+          </label>
           <div className="flex justify-end gap-3">
             <button onClick={() => setUpdModal(null)} className="px-4 py-2 text-slate-400 hover:text-white text-sm">Отмена</button>
-            <button onClick={doUpd} disabled={!updForm.file || !updForm.num || !updForm.date} className="px-6 py-2 bg-blue-500 hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors">
-              Загрузить
+            <button onClick={doUpd} disabled={!updForm.noGS && (!updForm.file || !updForm.num || !updForm.date)} className="px-6 py-2 bg-blue-500 hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors">
+              {updForm.noGS ? "Подтвердить" : "Загрузить"}
             </button>
         </div>
       </div>
@@ -1034,7 +1213,7 @@ const FinResults = ({ data, setData, pushLog }) => {
                 ["PO клиента", detailModal.customerPo],
                 ["Дата заказа", detailModal.orderDate],
                 ["Сумма клиента ($)", "$" + fmt(detailModal.customerAmount)],
-                ["Статус заказа / УПД", detailModal.orderStatus || "—"],
+                ["Статус заказа / УПД", detailModal.noGlobalSmart ? "Без участия GS" : (detailModal.orderStatus || "—")],
                 ["Оплата факт (руб)", fmt(detailModal.paymentFact)],
                 ["PO поставщика", detailModal.supplierPo],
                 ["Сумма поставщика ($)", "$" + fmt(detailModal.supplierAmount)],
@@ -1059,11 +1238,15 @@ const FinResults = ({ data, setData, pushLog }) => {
                 <div className="text-slate-300">{detailModal.comment}</div>
               </div>
             )}
-            {detailModal.hasUpd && (
+            {detailModal.noGlobalSmart ? (
+              <div className="bg-blue-500/10 border border-blue-500/20 p-3 rounded-lg text-blue-300 text-sm">
+                🔹 Заказ без участия Global Smart
+              </div>
+            ) : detailModal.hasUpd ? (
               <div className="bg-emerald-500/10 border border-emerald-500/20 p-3 rounded-lg text-emerald-300 text-sm">
                 ✅ УПД №{detailModal.updNum} от {detailModal.updDate}
               </div>
-            )}
+            ) : null}
           </div>
         )}
       </Modal>
@@ -1108,17 +1291,31 @@ const FinResults = ({ data, setData, pushLog }) => {
             </div>
 
             {/* Секция УПД */}
-            <div className={`border rounded-lg p-3 ${editForm.hasUpd ? "border-emerald-500/30 bg-emerald-500/5" : "border-slate-600/50"}`}>
+            <div className={`border rounded-lg p-3 ${editForm.noGlobalSmart ? "border-blue-500/30 bg-blue-500/5" : editForm.hasUpd ? "border-emerald-500/30 bg-emerald-500/5" : "border-slate-600/50"}`}>
               <div className="flex items-center justify-between mb-3">
                 <h4 className="text-xs text-slate-400 uppercase tracking-wider font-semibold">📄 УПД (универсальный передаточный документ)</h4>
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input type="checkbox" checked={editForm.hasUpd}
-                    onChange={(e) => setEditForm({ ...editForm, hasUpd: e.target.checked, ...(!e.target.checked ? { updNum: "", updDate: "", updFile: null, _newUpdFile: null } : {}) })}
-                    className="w-4 h-4 rounded border-slate-600 text-emerald-500 focus:ring-emerald-500/30" />
-                  <span className="text-xs text-slate-300">УПД загружена</span>
-                </label>
+                <div className="flex items-center gap-4">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={editForm.noGlobalSmart}
+                      onChange={(e) => setEditForm({ ...editForm, noGlobalSmart: e.target.checked, ...(e.target.checked ? { hasUpd: true, updNum: "Без участия GS", updDate: "", updFile: null, _newUpdFile: null, orderStatus: "Без участия GS" } : { hasUpd: false, updNum: "", updDate: "", updFile: null, _newUpdFile: null, orderStatus: "" }) })}
+                      className="w-4 h-4 rounded border-slate-600 text-blue-500 focus:ring-blue-500/30" />
+                    <span className="text-xs text-slate-300">Без участия GS</span>
+                  </label>
+                  {!editForm.noGlobalSmart && (
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="checkbox" checked={editForm.hasUpd && !editForm.noGlobalSmart}
+                        onChange={(e) => setEditForm({ ...editForm, hasUpd: e.target.checked, ...(!e.target.checked ? { updNum: "", updDate: "", updFile: null, _newUpdFile: null } : {}) })}
+                        className="w-4 h-4 rounded border-slate-600 text-emerald-500 focus:ring-emerald-500/30" />
+                      <span className="text-xs text-slate-300">УПД загружена</span>
+                    </label>
+                  )}
+                </div>
               </div>
-              {editForm.hasUpd ? (
+              {editForm.noGlobalSmart ? (
+                <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 text-blue-300 text-sm">
+                  🔹 Заказ отмечен как «Без участия Global Smart». Вместо УПД будет отображена эта пометка.
+                </div>
+              ) : editForm.hasUpd ? (
                 <div className="space-y-3">
                   <div className="grid grid-cols-2 gap-3">
                     <InputField label="Номер УПД" value={editForm.updNum} onChange={(v) => setEditForm({ ...editForm, updNum: v })} />
@@ -1149,8 +1346,8 @@ const FinResults = ({ data, setData, pushLog }) => {
               ) : (
                 <div className="text-xs text-slate-500 italic">УПД не загружена. Включите чекбокс, чтобы добавить УПД.</div>
               )}
-              {editForm.hasUpd && (
-                <button onClick={() => setEditForm({ ...editForm, hasUpd: false, updNum: "", updDate: "", updFile: null, _newUpdFile: null, orderStatus: "" })}
+              {editForm.hasUpd && !editForm.noGlobalSmart && (
+                <button onClick={() => setEditForm({ ...editForm, hasUpd: false, noGlobalSmart: false, updNum: "", updDate: "", updFile: null, _newUpdFile: null, orderStatus: "" })}
                   className="mt-3 px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 rounded-lg text-xs font-medium border border-rose-500/30 transition-colors">
                   🗑 Удалить УПД (заказ уйдёт из дебиторки)
                 </button>
@@ -1397,7 +1594,7 @@ const ExpandedLogisticsPanel = ({ order, setData, pushLog }) => {
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-1.5">
               <span className="text-sm">💬</span>
-              <span className="text-[11px] font-semibold text-[#1E3A5F] uppercase tracking-wide">Комментарии логиста</span>
+              <span className="text-[11px] font-semibold text-[#1E3A5F] uppercase tracking-wide">Комментарии</span>
             </div>
             {editing !== "comments" ? (
               <button onClick={() => startFieldEdit("comments")} className="text-[10px] text-blue-600 hover:text-blue-800 font-medium">✏️ Изменить</button>
@@ -1430,7 +1627,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(-1); // -1 = auto last page
   const [updModal, setUpdModal] = useState(null);
-  const [updForm, setUpdForm] = useState({ num: "", date: "", file: null });
+  const [updForm, setUpdForm] = useState({ num: "", date: "", file: null, noGS: false });
   const [detailModal, setDetailModal] = useState(null);
   const [editModal, setEditModal] = useState(null);
   const [editForm, setEditForm] = useState({});
@@ -1468,7 +1665,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
   const cancelInlineEdit = () => setInlineEdit(null);
 
   // Синхронизация УПД: OpenPO → Фин. результат (по совпадению PO клиента)
-  const syncUpdToFinResults = useCallback((poInternalPo, hasUpd, updNum, updDate, updFile) => {
+  const syncUpdToFinResults = useCallback((poInternalPo, hasUpd, updNum, updDate, updFile, noGlobalSmart) => {
     if (!setFinResults) return;
     setFinResults((prev) =>
       prev.map((fr) => {
@@ -1478,14 +1675,15 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
             return {
               ...fr,
               hasUpd: true,
+              noGlobalSmart: !!noGlobalSmart,
               updNum: updNum || fr.updNum,
               updDate: updDate || fr.updDate,
               updFile: updFile || fr.updFile,
-              orderStatus: updNum ? `УПД №${updNum} от ${updDate}` : fr.orderStatus,
+              orderStatus: noGlobalSmart ? "Без участия GS" : (updNum ? `УПД №${updNum} от ${updDate}` : fr.orderStatus),
             };
           } else {
             // УПД удалена — убираем из FinResults и, следовательно, из Дебиторки
-            return { ...fr, hasUpd: false, updNum: "", updDate: "", updFile: null, orderStatus: "" };
+            return { ...fr, hasUpd: false, noGlobalSmart: false, updNum: "", updDate: "", updFile: null, orderStatus: "" };
           }
         }
         return fr;
@@ -1495,10 +1693,10 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
   const [newPO, setNewPO] = useState({
     customer: "", respSales: "", internalPo: "", dateOrdered: new Date().toISOString().split("T")[0],
     customerDeadline: "", termsDelivery: "", customerAmount: 0, paymentStatusCustomer: "",
-    dateCustomerPaid: "", datePlacedSupplier: "", respProcurement: "",
+    dateCustomerPaid: "",
     deliveryCost: 0, awb: "", tracking: "", comments: "", mgmtComments: "",
     type: "domestic",
-    externalOrders: [{ po: "", supplier: "", supplierAmount: 0, payment: "", payingCompany: "", cancelled: false }],
+    externalOrders: [{ po: "", supplier: "", supplierAmount: 0, payment: "", payingCompany: "", datePlaced: "", respProcurement: "", cancelled: false }],
   });
   const PP = 30;
 
@@ -1536,37 +1734,64 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
   const slice = filtered.slice(effectivePage * PP, (effectivePage + 1) * PP);
 
   const doUpd = () => {
-    if (!updModal || !updForm.file) return;
-    const reader = new FileReader();
-    reader.onload = (e) => {
+    if (!updModal) return;
+    if (!updForm.noGS && !updForm.file) return;
+
+    const applyPoUpdate = (fileData) => {
       pushLog({
         type: "po_upd",
         id: updModal.id,
-        prev: { hasUpd: updModal.hasUpd, updNum: updModal.updNum, updDate: updModal.updDate, mgmtComments: updModal.mgmtComments },
+        prev: { hasUpd: updModal.hasUpd, updNum: updModal.updNum, updDate: updModal.updDate, mgmtComments: updModal.mgmtComments, noGlobalSmart: updModal.noGlobalSmart },
       });
-      setData((prev) =>
-        prev.map((r) =>
-          r.id === updModal.id
-            ? {
-                ...r, hasUpd: true, updNum: updForm.num, updDate: updForm.date, updFile: e.target.result,
-                mgmtComments: `${r.mgmtComments ? r.mgmtComments + "\n" : ""}УПД №${updForm.num} от ${updForm.date}`,
-              }
-            : r
-        )
-      );
-      // Синхронизация → Фин. результат → Дебиторка
-      syncUpdToFinResults(updModal.internalPo, true, updForm.num, updForm.date, e.target.result);
+      if (updForm.noGS) {
+        setData((prev) =>
+          prev.map((r) =>
+            r.id === updModal.id
+              ? {
+                  ...r, hasUpd: true, noGlobalSmart: true, updNum: "Без участия GS", updDate: "", updFile: null,
+                  mgmtComments: `${r.mgmtComments ? r.mgmtComments + "\n" : ""}Без участия GS`,
+                }
+              : r
+          )
+        );
+        syncUpdToFinResults(updModal.internalPo, true, "Без участия GS", "", null, true);
+      } else {
+        setData((prev) =>
+          prev.map((r) =>
+            r.id === updModal.id
+              ? {
+                  ...r, hasUpd: true, noGlobalSmart: false, updNum: updForm.num, updDate: updForm.date, updFile: fileData,
+                  mgmtComments: `${r.mgmtComments ? r.mgmtComments + "\n" : ""}УПД №${updForm.num} от ${updForm.date}`,
+                }
+              : r
+          )
+        );
+        syncUpdToFinResults(updModal.internalPo, true, updForm.num, updForm.date, fileData, false);
+      }
       setUpdModal(null);
-      setUpdForm({ num: "", date: "", file: null });
+      setUpdForm({ num: "", date: "", file: null, noGS: false });
     };
-    reader.readAsDataURL(updForm.file);
+
+    if (updForm.noGS) {
+      applyPoUpdate(null);
+    } else {
+      const reader = new FileReader();
+      reader.onload = (e) => applyPoUpdate(e.target.result);
+      reader.readAsDataURL(updForm.file);
+    }
   };
 
   const cancelOrder = () => {
-    if (!cancelModal) return;
-    pushLog({ type: "po_cancel", id: cancelModal.id, prev: { status: cancelModal.status, cancelReason: cancelModal.cancelReason } });
+    if (!cancelModal || !cancelReason.trim()) return;
+    pushLog({ type: "po_cancel", id: cancelModal.id, prev: { status: cancelModal.status, cancelReason: cancelModal.cancelReason, comments: cancelModal.comments } });
+    const dateStr = new Date().toLocaleDateString("ru-RU");
+    const cancelComment = `[${dateStr}] ОТМЕНА ЗАКАЗА: ${cancelReason.trim()}`;
     setData((prev) =>
-      prev.map((r) => (r.id === cancelModal.id ? { ...r, status: "cancelled", cancelReason } : r))
+      prev.map((r) => (r.id === cancelModal.id ? {
+        ...r, status: "cancelled", cancelReason,
+        orderStage: "cancel",
+        comments: r.comments ? `${r.comments}\n${cancelComment}` : cancelComment,
+      } : r))
     );
     setCancelModal(null);
     setCancelReason("");
@@ -1596,9 +1821,9 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
       customerAmount: r.customerAmount,
       paymentStatusCustomer: r.paymentStatusCustomer,
       comments: r.comments, awb: r.awb, tracking: r.tracking,
-      respProcurement: r.respProcurement,
       customerDeadline: r.customerDeadline, termsDelivery: r.termsDelivery,
-      hasUpd: r.hasUpd || false, updNum: r.updNum || "", updDate: r.updDate || "", updFile: r.updFile || null,
+      hasUpd: r.hasUpd || false, noGlobalSmart: r.noGlobalSmart || false,
+      updNum: r.updNum || "", updDate: r.updDate || "", updFile: r.updFile || null,
       externalOrders: exts,
     });
   };
@@ -1615,21 +1840,45 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
       supplierAmounts: exts.map((e) => e.supplierAmount || "0").join("\n"),
       paymentStatusSupplier: exts.map((e) => e.payment).join("\n"),
       payingCompany: exts.map((e) => e.payingCompany).join("\n"),
+      datePlacedSupplier: exts.map((e) => e.datePlaced).join("\n"),
+      respProcurement: exts.map((e) => e.respProcurement).join("\n"),
     };
+    // Автозапись причин отмены ext PO в комментарии
+    const prevExts = parseExternalPOs(editModal);
+    const cancelComments = [];
+    exts.forEach((ext, i) => {
+      const wasCancelled = prevExts[i]?.cancelled || false;
+      if (ext.cancelled && !wasCancelled && ext.cancelReason) {
+        const dateStr = new Date().toLocaleDateString("ru-RU");
+        cancelComments.push(`[${dateStr}] ОТМЕНА PO ${ext.po}: ${ext.cancelReason}`);
+      }
+    });
+    if (cancelComments.length > 0) {
+      updatedForm.comments = (updatedForm.comments || "")
+        ? `${updatedForm.comments}\n${cancelComments.join("\n")}`
+        : cancelComments.join("\n");
+    }
     delete updatedForm.externalOrders;
     // Если удалили УПД — сбросить поля
     if (!updatedForm.hasUpd) {
       updatedForm.updNum = "";
       updatedForm.updDate = "";
       updatedForm.updFile = null;
+      updatedForm.noGlobalSmart = false;
+    }
+    if (updatedForm.noGlobalSmart) {
+      updatedForm.hasUpd = true;
+      updatedForm.updNum = "Без участия GS";
+      updatedForm.updDate = "";
+      updatedForm.updFile = null;
     }
     setData((prev) => prev.map((r) => (r.id === editModal.id ? { ...r, ...updatedForm } : r)));
     // Синхронизация → Фин. результат → Дебиторка
-    syncUpdToFinResults(editModal.internalPo, updatedForm.hasUpd, updatedForm.updNum, updatedForm.updDate, updatedForm.updFile);
+    syncUpdToFinResults(editModal.internalPo, updatedForm.hasUpd, updatedForm.updNum, updatedForm.updDate, updatedForm.updFile, updatedForm.noGlobalSmart);
     setEditModal(null);
   };
 
-  const emptyExtPO = { po: "", supplier: "", supplierAmount: 0, payment: "", payingCompany: "", cancelled: false };
+  const emptyExtPO = { po: "", supplier: "", supplierAmount: 0, payment: "", payingCompany: "", datePlaced: "", respProcurement: "", cancelled: false, cancelReason: "" };
   const handleAddPO = () => {
     const id = Math.max(...data.map((o) => o.id), 0) + 1;
     const num = String(data.length + 1);
@@ -1645,14 +1894,25 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
       supplierAmounts: exts.map((e) => e.supplierAmount || "0").join("\n"),
       paymentStatusSupplier: exts.map((e) => e.payment).join("\n"),
       payingCompany: exts.map((e) => e.payingCompany).join("\n"),
+      datePlacedSupplier: exts.map((e) => e.datePlaced).join("\n"),
+      respProcurement: exts.map((e) => e.respProcurement).join("\n"),
     };
+    // Автозапись причин отмены ext PO в комментарии нового заказа
+    const cancelComments = exts
+      .filter((ext) => ext.cancelled && ext.cancelReason)
+      .map((ext) => `[${new Date().toLocaleDateString("ru-RU")}] ОТМЕНА PO ${ext.po}: ${ext.cancelReason}`);
+    if (cancelComments.length > 0) {
+      assembled.comments = assembled.comments
+        ? `${assembled.comments}\n${cancelComments.join("\n")}`
+        : cancelComments.join("\n");
+    }
     delete assembled.externalOrders;
     setData([...data, assembled]);
     setShowAdd(false);
     setNewPO({
       customer: "", respSales: "", internalPo: "", dateOrdered: new Date().toISOString().split("T")[0],
       customerDeadline: "", termsDelivery: "", customerAmount: 0, paymentStatusCustomer: "",
-      dateCustomerPaid: "", datePlacedSupplier: "", respProcurement: "",
+      dateCustomerPaid: "",
       deliveryCost: 0, awb: "", tracking: "", comments: "", mgmtComments: "",
       type: "domestic",
       externalOrders: [{ ...emptyExtPO }],
@@ -1757,7 +2017,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                     <td className="py-2 px-2 text-gray-900 font-mono text-xs max-w-[120px] truncate">{o.internalPo}</td>
                     <td className="py-2 px-2 text-gray-600 whitespace-nowrap">{o.dateOrdered || "—"}</td>
                     <td className="py-2 px-2 text-gray-600 whitespace-nowrap text-xs">{o.customerDeadline || "—"}</td>
-                    <td className="py-2 px-2 text-right text-gray-900 font-semibold tabular-nums whitespace-nowrap">{fmt(o.customerAmount)}</td>
+                    <td className="py-2 px-2 text-right text-gray-900 font-semibold tabular-nums whitespace-nowrap">${fmt(o.customerAmount)}</td>
                     <td className="py-2 px-2 max-w-[120px]" onClick={(e) => e.stopPropagation()}>
                       {inlineEdit && inlineEdit.id === o.id && inlineEdit.field === "paymentStatusCustomer" ? (
                         <div className="flex items-center gap-1">
@@ -1790,54 +2050,58 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                         </div>;
                       })()}
                     </td>
-                    {/* Поставщик — данные заказа */}
-                    <td className="py-2 px-2 text-xs max-w-[120px]">
-                      {(() => {
-                        const names = (o.supplierName || "").split("\n").map((s) => s.trim()).filter(Boolean);
-                        if (!names.length) return <span className="text-gray-400">—</span>;
-                        return names.length === 1
-                          ? <span className="text-gray-700 truncate block">{names[0]}</span>
-                          : <div className="space-y-0.5">{names.map((n, i) => <div key={i} className="text-gray-700 truncate text-[10px] leading-tight">{n}</div>)}</div>;
-                      })()}
-                    </td>
-                    {/* Сумма поставщика */}
-                    <td className="py-2 px-2 text-right text-gray-700 tabular-nums whitespace-nowrap text-xs">
-                      {(() => {
-                        const amts = (o.supplierAmounts || "").split("\n").map((s) => s.trim()).filter(Boolean);
-                        if (amts.length > 1) return <div className="space-y-0.5">{amts.map((a, i) => <div key={i} className="text-[10px] leading-tight">${fmt(parseFloat(a) || 0)}</div>)}</div>;
-                        return o.supplierAmount ? "$" + fmt(o.supplierAmount) : "—";
-                      })()}
-                    </td>
-                    {/* Оплата поставщику */}
-                    <td className="py-2 px-2 max-w-[120px]" onClick={(e) => e.stopPropagation()}>
-                      {inlineEdit && inlineEdit.id === o.id && inlineEdit.field === "paymentStatusSupplier" ? (
-                        <div className="flex items-center gap-1">
-                          <input type="text" value={inlineEdit.value} autoFocus
-                            onChange={(e) => setInlineEdit({ ...inlineEdit, value: e.target.value })}
-                            onKeyDown={(e) => { if (e.key === "Enter") saveInlineEdit(); if (e.key === "Escape") cancelInlineEdit(); }}
-                            className="w-full px-1.5 py-0.5 text-[11px] border border-blue-400 rounded bg-white focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                          <button onClick={saveInlineEdit} className="text-emerald-600 text-xs font-bold hover:text-emerald-800" title="Сохранить">✓</button>
-                          <button onClick={cancelInlineEdit} className="text-red-400 text-xs font-bold hover:text-red-600" title="Отмена">✕</button>
-                        </div>
-                      ) : (() => {
-                        const payments = (o.paymentStatusSupplier || "").split("\n").map((s) => s.trim()).filter(Boolean);
-                        if (!payments.length) return <span className="text-gray-400 cursor-pointer text-[10px]" onClick={() => startInlineEdit(o, "paymentStatusSupplier")}>—</span>;
-                        return <div className="space-y-0.5" onClick={() => startInlineEdit(o, "paymentStatusSupplier")}>
-                          {payments.map((p, pi) => {
-                            const paid = p.toLowerCase().includes("paid") && !p.toLowerCase().includes("not paid");
-                            return <div key={pi} className={`px-1 py-0.5 rounded text-[9px] font-medium cursor-pointer ${paid ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}>{p}</div>;
-                          })}
-                        </div>;
-                      })()}
-                    </td>
-                    {/* Платежная компания */}
-                    <td className="py-2 px-2 text-gray-600 text-xs max-w-[80px] truncate">{o.payingCompany || "—"}</td>
+                    {/* Поставщик — данные заказа (без отменённых PO) */}
+                    {(() => {
+                      const exts = parseExternalPOs(o);
+                      const active = exts.filter((e) => !e.cancelled);
+                      const suppliers = active.map((e) => e.supplier).filter(Boolean);
+                      const amounts = active.map((e) => e.supplierAmount).filter(Boolean);
+                      const payments = active.map((e) => e.payment).filter(Boolean);
+                      const companies = active.map((e) => e.payingCompany).filter(Boolean);
+                      return (<>
+                        <td className="py-2 px-2 text-xs max-w-[120px]">
+                          {!suppliers.length ? <span className="text-gray-400">—</span> :
+                            suppliers.length === 1 ? <span className="text-gray-700 truncate block">{suppliers[0]}</span> :
+                            <div className="space-y-0.5">{suppliers.map((n, i) => <div key={i} className="text-gray-700 truncate text-[10px] leading-tight">{n}</div>)}</div>}
+                        </td>
+                        <td className="py-2 px-2 text-right text-gray-700 tabular-nums whitespace-nowrap text-xs">
+                          {amounts.length > 1 ? <div className="space-y-0.5">{amounts.map((a, i) => <div key={i} className="text-[10px] leading-tight">${fmt(parseFloat(a) || 0)}</div>)}</div>
+                            : amounts.length === 1 ? "$" + fmt(parseFloat(amounts[0]) || 0)
+                            : o.supplierAmount ? "$" + fmt(o.supplierAmount) : "—"}
+                        </td>
+                        <td className="py-2 px-2 max-w-[120px]" onClick={(e) => e.stopPropagation()}>
+                          {inlineEdit && inlineEdit.id === o.id && inlineEdit.field === "paymentStatusSupplier" ? (
+                            <div className="flex items-center gap-1">
+                              <input type="text" value={inlineEdit.value} autoFocus
+                                onChange={(e) => setInlineEdit({ ...inlineEdit, value: e.target.value })}
+                                onKeyDown={(e) => { if (e.key === "Enter") saveInlineEdit(); if (e.key === "Escape") cancelInlineEdit(); }}
+                                className="w-full px-1.5 py-0.5 text-[11px] border border-blue-400 rounded bg-white focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                              <button onClick={saveInlineEdit} className="text-emerald-600 text-xs font-bold hover:text-emerald-800" title="Сохранить">✓</button>
+                              <button onClick={cancelInlineEdit} className="text-red-400 text-xs font-bold hover:text-red-600" title="Отмена">✕</button>
+                            </div>
+                          ) : (() => {
+                            if (!payments.length) return <span className="text-gray-400 cursor-pointer text-[10px]" onClick={() => startInlineEdit(o, "paymentStatusSupplier")}>—</span>;
+                            return <div className="space-y-0.5" onClick={() => startInlineEdit(o, "paymentStatusSupplier")}>
+                              {payments.map((p, pi) => {
+                                const paid = p.toLowerCase().includes("paid") && !p.toLowerCase().includes("not paid");
+                                return <div key={pi} className={`px-1 py-0.5 rounded text-[9px] font-medium cursor-pointer ${paid ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}>{p}</div>;
+                              })}
+                            </div>;
+                          })()}
+                        </td>
+                        <td className="py-2 px-2 text-gray-600 text-xs max-w-[80px] truncate">{companies.length > 0 ? companies.join(", ") : "—"}</td>
+                      </>);
+                    })()}
                     <td className="py-2 px-2 text-gray-600 text-xs max-w-[80px] truncate">{parseDeliveryCost(o.deliveryCost).plan || "—"}</td>
                     <td className="py-2 px-2" onClick={(e) => e.stopPropagation()}>
-                      <KanbanDropdown order={o} setData={setData} pushLog={pushLog} />
+                      <KanbanDropdown order={o} setData={setData} pushLog={pushLog} syncUpdToFinResults={syncUpdToFinResults} />
                     </td>
                     <td className="py-2 px-2 text-center">
-                      {o.hasUpd ? (
+                      {o.noGlobalSmart ? (
+                        <span className="text-blue-600 text-xs font-medium cursor-help" title="Заказ без участия Global Smart">
+                          🔹 Без участия GS
+                        </span>
+                      ) : o.hasUpd ? (
                         <span className="text-emerald-600 text-xs cursor-help" title={`УПД №${o.updNum} от ${o.updDate}`}>
                           ✅ <span className="text-emerald-700 font-medium">УПД №{o.updNum || "—"} от {o.updDate || "—"}</span>
                         </span>
@@ -1847,7 +2111,6 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                       <div className="flex items-center justify-center gap-1">
                         <button onClick={() => startEdit(o)} className="p-1 hover:bg-gray-200 rounded" title="Редактировать">✏️</button>
                         <button onClick={() => deleteOrder(o)} className="p-1 hover:bg-red-100 rounded text-red-400 hover:text-red-600" title="Удалить заказ">🗑️</button>
-                        {!o.hasUpd && o.status === "active" && <button onClick={() => setUpdModal(o)} className="p-1 hover:bg-blue-100 rounded text-blue-600" title="Загрузить УПД">📄</button>}
                       </div>
                     </td>
                   </tr>
@@ -1925,16 +2188,23 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
           <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 text-blue-300 text-sm">
             📌 Логист загружает скан УПД. Данные автоматически обновятся в <b>Фин. результат</b> и <b>Дебиторке</b>.
           </div>
-          <InputField label="Номер УПД *" value={updForm.num} onChange={(v) => setUpdForm({ ...updForm, num: v })} placeholder="Напр.: 153" />
-          <InputField label="Дата УПД *" value={updForm.date} onChange={(v) => setUpdForm({ ...updForm, date: v })} type="date" />
+          <InputField label="Номер УПД *" value={updForm.num} onChange={(v) => setUpdForm({ ...updForm, num: v })} placeholder="Напр.: 153" disabled={updForm.noGS} />
+          <InputField label="Дата УПД *" value={updForm.date} onChange={(v) => setUpdForm({ ...updForm, date: v })} type="date" disabled={updForm.noGS} />
           <div>
-            <label className="text-xs text-slate-400 mb-1 block">Скан УПД (PDF/JPG/PNG) *</label>
-            <input type="file" accept=".pdf,.jpg,.jpeg,.png" onChange={(e) => setUpdForm({ ...updForm, file: e.target.files[0] })} className="w-full text-sm text-slate-300" />
+            <label className={`text-xs text-slate-400 mb-1 block ${updForm.noGS ? "opacity-40" : ""}`}>Скан УПД (PDF/JPG/PNG) *</label>
+            <input type="file" accept=".pdf,.jpg,.jpeg,.png" onChange={(e) => setUpdForm({ ...updForm, file: e.target.files[0] })} className={`w-full text-sm text-slate-300 ${updForm.noGS ? "opacity-40" : ""}`} disabled={updForm.noGS} />
           </div>
+          <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
+            <input type="checkbox" checked={updForm.noGS || false} onChange={(e) => setUpdForm({ ...updForm, noGS: e.target.checked, ...(e.target.checked ? { num: "", date: "", file: null } : {}) })}
+              className="accent-blue-500 w-4 h-4 rounded" />
+            Заказ без участия Global Smart
+          </label>
           <div className="flex justify-end gap-3">
             <button onClick={() => setUpdModal(null)} className="px-4 py-2 text-slate-400 hover:text-white text-sm">Отмена</button>
-            <button onClick={doUpd} disabled={!updForm.file || !updForm.num || !updForm.date}
-              className="px-6 py-2 bg-blue-500 hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors">Загрузить</button>
+            <button onClick={doUpd} disabled={!updForm.noGS && (!updForm.file || !updForm.num || !updForm.date)}
+              className="px-6 py-2 bg-blue-500 hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors">
+              {updForm.noGS ? "Подтвердить" : "Загрузить"}
+            </button>
           </div>
         </div>
       </Modal>
@@ -1972,10 +2242,11 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                   <div><div className="text-slate-500 text-[10px] mb-0.5">Сумма ($)</div><div className="text-slate-200 font-bold">{ext.supplierAmount ? "$" + fmt(parseFloat(ext.supplierAmount) || 0) : "—"}</div></div>
                   <div><div className="text-slate-500 text-[10px] mb-0.5">Статус оплаты</div><div className={`font-medium ${(ext.payment || "").toLowerCase().includes("paid") && !(ext.payment || "").toLowerCase().includes("not") ? "text-emerald-400" : "text-amber-400"}`}>{ext.payment || "—"}</div></div>
                   <div><div className="text-slate-500 text-[10px] mb-0.5">Плат. компания</div><div className="text-slate-200">{ext.payingCompany || "—"}</div></div>
+                  <div><div className="text-slate-500 text-[10px] mb-0.5">Дата размещения</div><div className="text-slate-200">{ext.datePlaced || "—"}</div></div>
+                  <div><div className="text-slate-500 text-[10px] mb-0.5">Resp. Procurement</div><div className="text-slate-200">{ext.respProcurement || "—"}</div></div>
                 </div>
               ))}
               <div className="grid grid-cols-2 gap-3 text-sm mt-2">
-                <div className="py-2 border-b border-slate-700/30"><div className="text-slate-500 text-xs mb-1">Resp. Procurement</div><div className="text-slate-200">{detailModal.respProcurement || "—"}</div></div>
                 <div className="py-2 border-b border-slate-700/30"><div className="text-slate-500 text-xs mb-1">Общая сумма поставщикам</div><div className="text-slate-200 font-bold">${fmt(detailModal.supplierAmount)}</div></div>
                 <div className="py-2 border-b border-slate-700/30"><div className="text-slate-500 text-xs mb-1">Date Paid Supplier</div><div className="text-slate-200 whitespace-pre-wrap">{detailModal.datePaidSupplier || "—"}</div></div>
                 <div className="py-2 border-b border-slate-700/30"><div className="text-slate-500 text-xs mb-1">Delivery Cost</div><div className="text-slate-200">{detailModal.deliveryCost ? "$" + fmt(detailModal.deliveryCost) : "—"}</div></div>
@@ -1986,6 +2257,16 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
               <div className="bg-slate-700/30 p-3 rounded-lg text-sm">
                 <div className="text-slate-500 text-xs mb-1">Comments</div>
                 <div className="text-slate-300 text-xs whitespace-pre-wrap max-h-40 overflow-y-auto">{detailModal.comments}</div>
+              </div>
+            )}
+            {detailModal.noGlobalSmart && (
+              <div className="bg-blue-500/10 border border-blue-500/20 p-3 rounded-lg text-sm text-blue-300">
+                🔹 Заказ без участия Global Smart
+              </div>
+            )}
+            {detailModal.hasUpd && !detailModal.noGlobalSmart && (
+              <div className="bg-emerald-500/10 border border-emerald-500/20 p-3 rounded-lg text-sm text-emerald-300">
+                ✅ УПД №{detailModal.updNum} от {detailModal.updDate}
               </div>
             )}
             {detailModal.mgmtComments && (
@@ -2007,10 +2288,9 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
               <InputField label="Resp. Sales" value={editForm.respSales} onChange={(v) => setEditForm({ ...editForm, respSales: v })} />
               <InputField label="Internal PO" value={editForm.internalPo} onChange={(v) => setEditForm({ ...editForm, internalPo: v })} />
               <InputField label="Customer Amount ($)" value={editForm.customerAmount} onChange={(v) => setEditForm({ ...editForm, customerAmount: parseFloat(v) || 0 })} type="number" />
-              <InputField label="Deadline" value={editForm.customerDeadline} onChange={(v) => setEditForm({ ...editForm, customerDeadline: v })} />
+              <InputField label="Deadline" value={editForm.customerDeadline} onChange={(v) => setEditForm({ ...editForm, customerDeadline: v })} type="date" />
               <InputField label="Terms" value={editForm.termsDelivery} onChange={(v) => setEditForm({ ...editForm, termsDelivery: v })} />
               <InputField label="Payment Status" value={editForm.paymentStatusCustomer} onChange={(v) => setEditForm({ ...editForm, paymentStatusCustomer: v })} />
-              <InputField label="Resp. Procurement" value={editForm.respProcurement} onChange={(v) => setEditForm({ ...editForm, respProcurement: v })} />
             </div>
 
             {/* Блок External PO */}
@@ -2030,11 +2310,23 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                     <span className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">External PO #{ei + 1}</span>
                     <label className="text-[10px] text-red-400 flex items-center gap-1 ml-auto">
                       <input type="checkbox" checked={ext.cancelled || false} onChange={(e) => {
-                        const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], cancelled: e.target.checked };
+                        const upd = [...editForm.externalOrders];
+                        if (e.target.checked) {
+                          const reason = prompt("Укажите причину отмены External PO:");
+                          if (!reason || !reason.trim()) return; // отмена без причины не допускается
+                          upd[ei] = { ...upd[ei], cancelled: true, cancelReason: reason.trim() };
+                        } else {
+                          upd[ei] = { ...upd[ei], cancelled: false, cancelReason: "" };
+                        }
                         setEditForm({ ...editForm, externalOrders: upd });
                       }} /> Отменён
                     </label>
                   </div>
+                  {ext.cancelled && ext.cancelReason && (
+                    <div className="mb-2 bg-red-500/10 border border-red-500/20 rounded-lg p-2 text-xs text-red-300">
+                      ⛔ Причина: {ext.cancelReason}
+                    </div>
+                  )}
                   <div className={`grid grid-cols-2 gap-2 ${ext.cancelled ? "opacity-50" : ""}`}>
                     <InputField label="External PO" value={ext.po} onChange={(v) => {
                       const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], po: v };
@@ -2056,6 +2348,14 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                       const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], payingCompany: v };
                       setEditForm({ ...editForm, externalOrders: upd });
                     }} />
+                    <InputField label="Дата размещения" value={ext.datePlaced} onChange={(v) => {
+                      const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], datePlaced: v };
+                      setEditForm({ ...editForm, externalOrders: upd });
+                    }} type="date" />
+                    <InputField label="Resp. Procurement" value={ext.respProcurement} onChange={(v) => {
+                      const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], respProcurement: v };
+                      setEditForm({ ...editForm, externalOrders: upd });
+                    }} placeholder="KV, DS, DO..." />
                   </div>
                 </div>
               ))}
@@ -2072,23 +2372,35 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
             </div>
 
             {/* Секция УПД */}
-            <div className="border border-slate-600 rounded-lg p-3 space-y-2">
+            <div className={`border rounded-lg p-3 space-y-2 ${editForm.noGlobalSmart ? "border-blue-500/30 bg-blue-500/5" : editForm.hasUpd ? "border-emerald-500/30 bg-emerald-500/5" : "border-slate-600"}`}>
               <div className="flex items-center justify-between">
                 <h4 className="text-sm font-semibold text-blue-300">📄 УПД (Универсальный передаточный документ)</h4>
-                {editForm.hasUpd && (
-                  <button onClick={() => setEditForm({ ...editForm, hasUpd: false, updNum: "", updDate: "", updFile: null })}
+                {editForm.hasUpd && !editForm.noGlobalSmart && (
+                  <button onClick={() => setEditForm({ ...editForm, hasUpd: false, noGlobalSmart: false, updNum: "", updDate: "", updFile: null })}
                     className="text-xs text-red-400 hover:text-red-300">✕ Удалить УПД</button>
                 )}
               </div>
-              <div className="flex items-center gap-2 mb-2">
-                <label className="text-xs text-slate-300">
-                  <input type="checkbox" checked={editForm.hasUpd || false}
-                    onChange={(e) => setEditForm({ ...editForm, hasUpd: e.target.checked })}
-                    className="mr-2" />
-                  УПД загружена
+              <div className="flex items-center gap-4 mb-2">
+                <label className="text-xs text-slate-300 cursor-pointer">
+                  <input type="checkbox" checked={editForm.noGlobalSmart || false}
+                    onChange={(e) => setEditForm({ ...editForm, noGlobalSmart: e.target.checked, ...(e.target.checked ? { hasUpd: true, updNum: "Без участия GS", updDate: "", updFile: null } : { hasUpd: false, updNum: "", updDate: "", updFile: null }) })}
+                    className="mr-2 accent-blue-500" />
+                  Без участия GS
                 </label>
+                {!editForm.noGlobalSmart && (
+                  <label className="text-xs text-slate-300 cursor-pointer">
+                    <input type="checkbox" checked={editForm.hasUpd && !editForm.noGlobalSmart}
+                      onChange={(e) => setEditForm({ ...editForm, hasUpd: e.target.checked })}
+                      className="mr-2" />
+                    УПД загружена
+                  </label>
+                )}
               </div>
-              {editForm.hasUpd && (
+              {editForm.noGlobalSmart ? (
+                <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 text-blue-300 text-sm">
+                  🔹 Заказ отмечен как «Без участия Global Smart»
+                </div>
+              ) : editForm.hasUpd ? (
                 <div className="grid grid-cols-2 gap-3">
                   <InputField label="Номер УПД" value={editForm.updNum} onChange={(v) => setEditForm({ ...editForm, updNum: v })} />
                   <InputField label="Дата УПД" value={editForm.updDate} onChange={(v) => setEditForm({ ...editForm, updDate: v })} type="date" />
@@ -2107,7 +2419,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                     {editForm.updFile && <p className="text-xs text-emerald-400 mt-1">✓ Файл прикреплён</p>}
                   </div>
                 </div>
-              )}
+              ) : null}
             </div>
 
             <div className="flex justify-end gap-3 pt-2">
@@ -2126,12 +2438,10 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
             <InputField label="Resp. Sales *" value={newPO.respSales} onChange={(v) => setNewPO({ ...newPO, respSales: v })} placeholder="Напр.: AS, KV, GK" />
             <InputField label="Internal PO *" value={newPO.internalPo} onChange={(v) => setNewPO({ ...newPO, internalPo: v })} placeholder="Напр.: P2812326" />
             <InputField label="Date" value={newPO.dateOrdered} onChange={(v) => setNewPO({ ...newPO, dateOrdered: v })} type="date" />
-            <InputField label="Deadline" value={newPO.customerDeadline} onChange={(v) => setNewPO({ ...newPO, customerDeadline: v })} />
+            <InputField label="Deadline" value={newPO.customerDeadline} onChange={(v) => setNewPO({ ...newPO, customerDeadline: v })} type="date" />
             <InputField label="Terms of Delivery" value={newPO.termsDelivery} onChange={(v) => setNewPO({ ...newPO, termsDelivery: v })} placeholder="DDP MOW / EXW UAE" />
             <InputField label="Customer Amount ($)" value={newPO.customerAmount} onChange={(v) => setNewPO({ ...newPO, customerAmount: v })} type="number" />
             <InputField label="Payment Status" value={newPO.paymentStatusCustomer} onChange={(v) => setNewPO({ ...newPO, paymentStatusCustomer: v })} />
-            <InputField label="Дата размещения у поставщика" value={newPO.datePlacedSupplier} onChange={(v) => setNewPO({ ...newPO, datePlacedSupplier: v })} type="date" />
-            <InputField label="Resp. Procurement" value={newPO.respProcurement} onChange={(v) => setNewPO({ ...newPO, respProcurement: v })} placeholder="Напр.: KV" />
           </div>
 
           {/* Блок External PO */}
@@ -2151,11 +2461,23 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                   <span className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">External PO #{ei + 1}</span>
                   <label className="text-[10px] text-red-400 flex items-center gap-1 ml-auto">
                     <input type="checkbox" checked={ext.cancelled || false} onChange={(e) => {
-                      const upd = [...newPO.externalOrders]; upd[ei] = { ...upd[ei], cancelled: e.target.checked };
+                      const upd = [...newPO.externalOrders];
+                      if (e.target.checked) {
+                        const reason = prompt("Укажите причину отмены External PO:");
+                        if (!reason || !reason.trim()) return;
+                        upd[ei] = { ...upd[ei], cancelled: true, cancelReason: reason.trim() };
+                      } else {
+                        upd[ei] = { ...upd[ei], cancelled: false, cancelReason: "" };
+                      }
                       setNewPO({ ...newPO, externalOrders: upd });
                     }} /> Отменён
                   </label>
                 </div>
+                {ext.cancelled && ext.cancelReason && (
+                  <div className="mb-2 bg-red-500/10 border border-red-500/20 rounded-lg p-2 text-xs text-red-300">
+                    ⛔ Причина: {ext.cancelReason}
+                  </div>
+                )}
                 <div className={`grid grid-cols-2 gap-2 ${ext.cancelled ? "opacity-50" : ""}`}>
                   <InputField label="External PO *" value={ext.po} onChange={(v) => {
                     const upd = [...newPO.externalOrders]; upd[ei] = { ...upd[ei], po: v };
@@ -2177,6 +2499,14 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                     const upd = [...newPO.externalOrders]; upd[ei] = { ...upd[ei], payingCompany: v };
                     setNewPO({ ...newPO, externalOrders: upd });
                   }} />
+                  <InputField label="Дата размещения" value={ext.datePlaced} onChange={(v) => {
+                    const upd = [...newPO.externalOrders]; upd[ei] = { ...upd[ei], datePlaced: v };
+                    setNewPO({ ...newPO, externalOrders: upd });
+                  }} type="date" />
+                  <InputField label="Resp. Procurement" value={ext.respProcurement} onChange={(v) => {
+                    const upd = [...newPO.externalOrders]; upd[ei] = { ...upd[ei], respProcurement: v };
+                    setNewPO({ ...newPO, externalOrders: upd });
+                  }} placeholder="KV, DS, DO..." />
                 </div>
               </div>
             ))}
