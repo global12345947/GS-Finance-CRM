@@ -333,39 +333,7 @@ const parseDeliveryCost = (raw) => {
 
 // ==================== АВТО-ДЕБИТОРКА (из Фин. результат) ====================
 // Заказы с УПД, но без оплаты — автоматически попадают в дебиторку
-const getAutoDebts = (finResults, existingDebts) => {
-  // Собираем PO, которые уже есть в ручных долгах
-  const existingOrders = new Set(existingDebts.map((d) => d.order));
-  return finResults
-    .filter((r) => {
-      // Есть УПД, но нет оплаты, и заказ не отменён
-      if (!r.hasUpd) return false;
-      if (r.status === "cancelled") return false;
-      if (r.noGlobalSmart) return false; // без участия GS — не дебиторка
-      const pf = typeof r.paymentFact === "number" ? r.paymentFact : parseFloat(r.paymentFact) || 0;
-      if (pf > 0) return false;
-      // Не дублировать с ручными долгами
-      if (existingOrders.has(r.customerPo)) return false;
-      return true;
-    })
-    .map((r) => ({
-      id: `auto_${r.id}`,
-      company: r.customer,
-      order: r.customerPo,
-      amount: r.customerAmount || 0,
-      dueDate: "",
-      upd: r.orderStatus || (r.updNum ? `УПД №${r.updNum} от ${r.updDate}` : "УПД загружена"),
-      currency: "USD",
-      status: "open",
-      payDoc: null,
-      payDate: "",
-      payComment: "",
-      source: "auto",
-      finResultId: r.id,
-      orderDate: r.orderDate,
-      type: r.type,
-    }));
-};
+// getAutoDebts удалена — дебиторка теперь ТОЛЬКО из ручных данных (debtsData.js)
 
 // ==================== UI КОМПОНЕНТЫ ====================
 const StatusBadge = ({ status }) => {
@@ -559,22 +527,18 @@ const Dashboard = ({ balances, debts, finResults }) => {
     return { usd, aed, bat };
   }, [balances]);
 
-  // Авто-дебиторка из Фин. результат
-  const autoDebts = useMemo(() => getAutoDebts(finResults || [], debts), [finResults, debts]);
-  const allDebts = useMemo(() => [...debts, ...autoDebts], [debts, autoDebts]);
-
-  // Просроченные дебиторки (из ручных + авто)
+  // Просроченные дебиторки
   const overdueTotal = useMemo(() => {
-    const overdueDebts = allDebts.filter(
-      (d) => d.status === "open" && d.amount > 0 && !d.order?.includes("ИТОГО") && d.dueDate && new Date(d.dueDate) < new Date()
+    const overdueDebts = debts.filter(
+      (d) => d.status === "open" && d.amount > 0 && d.dueDate && new Date(d.dueDate) < new Date()
     );
     return overdueDebts.reduce((s, d) => s + d.amount, 0);
-  }, [allDebts]);
+  }, [debts]);
 
-  // Общая дебиторка (вкл. авто)
+  // Общая дебиторка
   const totalDebtDash = useMemo(() => {
-    return allDebts.filter((d) => d.status === "open" && d.amount > 0 && !d.order?.includes("ИТОГО")).reduce((s, d) => s + d.amount, 0);
-  }, [allDebts]);
+    return debts.filter((d) => d.status === "open" && d.amount > 0).reduce((s, d) => s + d.amount, 0);
+  }, [debts]);
 
   const fmtCell = (val, prefix = "") => {
     if (val === null || val === undefined) return <span className="text-gray-300">—</span>;
@@ -806,7 +770,7 @@ const FinStatusDropdown = ({ order, onChangeStatus }) => {
 };
 
 // ==================== ФИН. РЕЗУЛЬТАТ ====================
-const FinResults = ({ data, setData, pushLog }) => {
+const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
   const [filter, setFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState("all");
   const [search, setSearch] = useState("");
@@ -852,6 +816,7 @@ const FinResults = ({ data, setData, pushLog }) => {
     if (!payModal || !payForm.file) return;
     const reader = new FileReader();
     reader.onload = (e) => {
+      const payDocData = e.target.result;
       pushLog({
         type: "fin_payment",
         id: payModal.id,
@@ -860,10 +825,21 @@ const FinResults = ({ data, setData, pushLog }) => {
       setData((prev) =>
         prev.map((r) =>
           r.id === payModal.id
-            ? { ...r, paymentFact: parseFloat(payForm.amount) || 0, paymentDoc: e.target.result, paymentDate: payForm.date }
+            ? { ...r, paymentFact: parseFloat(payForm.amount) || 0, paymentDoc: payDocData, paymentDate: payForm.date }
             : r
         )
       );
+
+      // Синхронизация: закрываем долг в дебиторке по совпадению PO
+      if (setDebts && payModal.customerPo) {
+        setDebts((prev) => prev.map((d) => {
+          if (d.order === payModal.customerPo && d.status === "open") {
+            return { ...d, status: "closed", payDoc: payDocData, payDate: payForm.date, payComment: `Оплачено через Фин. результат: ₽${payForm.amount}` };
+          }
+          return d;
+        }));
+      }
+
       setPayModal(null);
       setPayForm({ amount: "", date: "", file: null });
     };
@@ -877,7 +853,7 @@ const FinResults = ({ data, setData, pushLog }) => {
       const hasPay = parseFloat(r.paymentFact) > 0;
       // Если заказ «без участия GS» — можно закрывать сразу
       if (r.noGlobalSmart) {
-        pushLog({ type: "fin_status", id: r.id, prev: r.status });
+    pushLog({ type: "fin_status", id: r.id, prev: r.status });
         setData((prev) => prev.map((x) => (x.id === r.id ? { ...x, status: "completed" } : x)));
         return;
       }
@@ -943,7 +919,11 @@ const FinResults = ({ data, setData, pushLog }) => {
 
     // Функция применения обновления
     const applyUpdate = (newPayDoc) => {
-      setData((prev) =>
+      const newPaymentFact = parseFloat(editForm.paymentFact) || 0;
+      const oldPaymentFact = parseFloat(editModal.paymentFact) || 0;
+      const finalPayDoc = newPayDoc || editForm.paymentDoc;
+
+    setData((prev) =>
         prev.map((x) =>
           x.id === editModal.id
             ? {
@@ -952,7 +932,7 @@ const FinResults = ({ data, setData, pushLog }) => {
                 customerPo: editForm.customerPo,
                 orderDate: editForm.orderDate,
                 customerAmount: parseFloat(editForm.customerAmount) || 0,
-                paymentFact: parseFloat(editForm.paymentFact) || 0,
+                paymentFact: newPaymentFact,
                 supplierPo: editForm.supplierPo,
                 supplierAmount: parseFloat(editForm.supplierAmount) || 0,
                 supplier: editForm.supplier,
@@ -963,12 +943,23 @@ const FinResults = ({ data, setData, pushLog }) => {
                 comment: editForm.comment,
                 type: editForm.type,
                 // Оплата
-                paymentDoc: newPayDoc || editForm.paymentDoc,
+                paymentDoc: finalPayDoc,
                 paymentDate: editForm.paymentDate,
               }
             : x
         )
       );
+
+      // Синхронизация с дебиторкой: если оплата появилась — закрываем долг
+      if (setDebts && newPaymentFact > 0 && oldPaymentFact === 0 && editModal.customerPo) {
+        setDebts((prev) => prev.map((d) => {
+          if (d.order === editModal.customerPo && d.status === "open") {
+            return { ...d, status: "closed", payDoc: finalPayDoc, payDate: editForm.paymentDate, payComment: `Оплачено через Фин. результат: ${newPaymentFact}` };
+          }
+          return d;
+        }));
+      }
+
       setEditModal(null);
     };
 
@@ -1105,13 +1096,13 @@ const FinResults = ({ data, setData, pushLog }) => {
                   </td>
                   <td className="py-2.5 px-2">
                     <div className="flex items-center gap-1">
-                      <button
+                    <button
                         onClick={(e) => { e.stopPropagation(); openEdit(r); }}
                         className="text-blue-600 hover:text-blue-800 text-xs transition-colors"
                         title="Редактировать заказ"
                       >
                         ✏️
-                      </button>
+                    </button>
                       <button
                         onClick={(e) => { e.stopPropagation(); deleteOrder(r); }}
                         className="text-red-400 hover:text-red-600 text-xs transition-colors"
@@ -1157,19 +1148,19 @@ const FinResults = ({ data, setData, pushLog }) => {
           const hasUpdOrGS = completeModal.hasUpd || completeModal.noGlobalSmart;
           const hasPay = parseFloat(completeModal.paymentFact) > 0;
           return (
-            <div className="space-y-4">
+        <div className="space-y-4">
               <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-amber-300 text-sm">
                 Для перевода заказа в статус «Выполнен» должны быть выполнены оба условия:
-              </div>
+          </div>
               <div className="space-y-3">
                 <div className={`flex items-center gap-3 p-3 rounded-lg border ${hasUpdOrGS ? "border-emerald-500/30 bg-emerald-500/5" : "border-red-500/30 bg-red-500/5"}`}>
                   <div className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 ${hasUpdOrGS ? "bg-emerald-500" : "bg-red-500/30"}`}>
                     {hasUpdOrGS ? <span className="text-white text-xs">✓</span> : <span className="text-red-400 text-xs">✕</span>}
                   </div>
-                  <div>
+          <div>
                     <div className={`text-sm font-medium ${hasUpdOrGS ? "text-emerald-300" : "text-red-300"}`}>
                       {completeModal.noGlobalSmart ? "Заказ без участия GS" : "УПД загружена"}
-                    </div>
+          </div>
                     <div className="text-[10px] text-slate-500 mt-0.5">
                       {hasUpdOrGS
                         ? (completeModal.noGlobalSmart ? "🔹 Без участия GS" : `✅ УПД №${completeModal.updNum} от ${completeModal.updDate}`)
@@ -1198,17 +1189,17 @@ const FinResults = ({ data, setData, pushLog }) => {
                   {!hasPay && <div className="mt-1">• Оплата от клиента должна быть внесена</div>}
                 </div>
               )}
-              <div className="flex justify-end gap-3">
+          <div className="flex justify-end gap-3">
                 <button onClick={() => setCompleteModal(null)} className="px-4 py-2 text-slate-400 hover:text-white text-sm">Закрыть</button>
                 <button onClick={confirmFinComplete} disabled={!hasUpdOrGS || !hasPay}
                   className="px-6 py-2 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors">
                   ✅ Подтвердить «Выполнен»
-                </button>
-              </div>
-            </div>
+            </button>
+        </div>
+      </div>
           );
         })()}
-      </Modal>
+    </Modal>
 
       {/* Модал внесения оплаты — только с платёжкой из банка */}
       <Modal isOpen={!!payModal} onClose={() => setPayModal(null)} title={`Внесение оплаты — ${payModal?.customer || ""}`}>
@@ -1277,8 +1268,8 @@ const FinResults = ({ data, setData, pushLog }) => {
                 ✅ УПД №{detailModal.updNum} от {detailModal.updDate}
               </div>
             ) : null}
-          </div>
-        )}
+              </div>
+            )}
       </Modal>
 
       {/* Модал редактирования заказа */}
@@ -1721,10 +1712,10 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
         prev: { hasUpd: updModal.hasUpd, updNum: updModal.updNum, updDate: updModal.updDate, mgmtComments: updModal.mgmtComments, noGlobalSmart: updModal.noGlobalSmart },
       });
       if (updForm.noGS) {
-        setData((prev) =>
-          prev.map((r) =>
-            r.id === updModal.id
-              ? {
+      setData((prev) =>
+        prev.map((r) =>
+          r.id === updModal.id
+            ? {
                   ...r, hasUpd: true, noGlobalSmart: true, updNum: "Без участия GS", updDate: "", updFile: null,
                   mgmtComments: `${r.mgmtComments ? r.mgmtComments + "\n" : ""}Без участия GS`,
                 }
@@ -1738,11 +1729,11 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
             r.id === updModal.id
               ? {
                   ...r, hasUpd: true, noGlobalSmart: false, updNum: updForm.num, updDate: updForm.date, updFile: fileData,
-                  mgmtComments: `${r.mgmtComments ? r.mgmtComments + "\n" : ""}УПД №${updForm.num} от ${updForm.date}`,
-                }
-              : r
-          )
-        );
+                mgmtComments: `${r.mgmtComments ? r.mgmtComments + "\n" : ""}УПД №${updForm.num} от ${updForm.date}`,
+              }
+            : r
+        )
+      );
         syncUpdToFinResults(updModal.internalPo, true, updForm.num, updForm.date, fileData, false);
       }
       setUpdModal(null);
@@ -1754,7 +1745,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
     } else {
       const reader = new FileReader();
       reader.onload = (e) => applyPoUpdate(e.target.result);
-      reader.readAsDataURL(updForm.file);
+    reader.readAsDataURL(updForm.file);
     }
   };
 
@@ -1963,7 +1954,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
               {f.l}
             </button>
           ))}
-        </div>
+    </div>
         <input type="text" placeholder="Поиск по клиенту, PO, поставщику..." value={search}
           onChange={(e) => { setSearch(e.target.value); setPage(-1); }}
           className="flex-1 min-w-48 px-4 py-2 bg-white border border-gray-300 rounded-lg text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:border-[#1E3A5F] focus:ring-1 focus:ring-[#1E3A5F]/30" />
@@ -1972,7 +1963,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
           + Новый PO
         </button>
         <span className="text-xs text-gray-500 font-medium">{filtered.length} записей</span>
-      </div>
+    </div>
 
       {/* Таблица */}
       <div className="rounded-xl shadow-lg overflow-hidden border border-[#1E3A5F]/30 flex flex-col" style={{ minHeight: "calc(100vh - 220px)" }}>
@@ -2037,7 +2028,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                             className="w-full px-1.5 py-0.5 text-[11px] border border-blue-400 rounded bg-white focus:outline-none focus:ring-1 focus:ring-blue-500" />
                           <button onClick={saveInlineEdit} className="text-emerald-600 text-xs font-bold hover:text-emerald-800" title="Сохранить">✓</button>
                           <button onClick={cancelInlineEdit} className="text-red-400 text-xs font-bold hover:text-red-600" title="Отмена">✕</button>
-                        </div>
+                      </div>
                       ) : (
                         <span onClick={() => startInlineEdit(o, "paymentStatusCustomer")}
                           className={`px-1.5 py-0.5 rounded text-[10px] font-medium cursor-pointer hover:ring-2 hover:ring-blue-300 transition-all ${isPaid ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}
@@ -2088,7 +2079,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                                 className="w-full px-1.5 py-0.5 text-[11px] border border-blue-400 rounded bg-white focus:outline-none focus:ring-1 focus:ring-blue-500" />
                               <button onClick={saveInlineEdit} className="text-emerald-600 text-xs font-bold hover:text-emerald-800" title="Сохранить">✓</button>
                               <button onClick={cancelInlineEdit} className="text-red-400 text-xs font-bold hover:text-red-600" title="Отмена">✕</button>
-                            </div>
+          </div>
                           ) : (() => {
                             if (!payments.length) return <span className="text-gray-400 cursor-pointer text-[10px]" onClick={() => startInlineEdit(o, "paymentStatusSupplier")}>—</span>;
                             return <div className="space-y-0.5" onClick={() => startInlineEdit(o, "paymentStatusSupplier")}>
@@ -2110,7 +2101,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                       {o.noGlobalSmart ? (
                         <span className="text-blue-600 text-xs font-medium cursor-help" title="Заказ без участия Global Smart">
                           🔹 Без участия GS
-                        </span>
+              </span>
                       ) : o.hasUpd ? (
                         <span className="text-emerald-600 text-xs cursor-help" title={`УПД №${o.updNum} от ${o.updDate}`}>
                           ✅ <span className="text-emerald-700 font-medium">УПД №{o.updNum || "—"} от {o.updDate || "—"}</span>
@@ -2137,7 +2128,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
               })}
             </tbody>
           </table>
-        </div>
+          </div>
         <div className="p-3 text-xs text-gray-500 border-t border-gray-200 bg-gray-50 flex items-center justify-between mt-auto">
           <span>Показано {slice.length} из {filtered.length}</span>
           {pages > 1 && (
@@ -2161,8 +2152,8 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                 className="px-2 py-1 rounded border border-gray-300 text-gray-600 hover:bg-gray-100 disabled:opacity-30">›</button>
               <button onClick={() => setPage(pages - 1)} disabled={effectivePage === pages - 1}
                 className="px-2 py-1 rounded border border-gray-300 text-gray-600 hover:bg-gray-100 disabled:opacity-30">»</button>
-            </div>
-          )}
+                      </div>
+                    )}
         </div>
       </div>
 
@@ -2374,12 +2365,12 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
             <div className="grid grid-cols-2 gap-3">
               <InputField label="AWB" value={editForm.awb} onChange={(v) => setEditForm({ ...editForm, awb: v })} />
               <InputField label="Tracking" value={editForm.tracking} onChange={(v) => setEditForm({ ...editForm, tracking: v })} />
-            </div>
+        </div>
             <div>
               <label className="text-xs text-slate-400 mb-1 block">Comments</label>
               <textarea value={editForm.comments || ""} onChange={(e) => setEditForm({ ...editForm, comments: e.target.value })}
                 className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500 h-20 resize-none" />
-            </div>
+      </div>
 
             {/* Секция УПД */}
             <div className={`border rounded-lg p-3 space-y-2 ${editForm.noGlobalSmart ? "border-blue-500/30 bg-blue-500/5" : editForm.hasUpd ? "border-emerald-500/30 bg-emerald-500/5" : "border-slate-600"}`}>
@@ -2551,41 +2542,45 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
 };
 
 // ==================== ДЕБИТОРСКАЯ ЗАДОЛЖЕННОСТЬ ====================
-const Debts = ({ debts, setDebts, pushLog, finResults }) => {
+const Debts = ({ debts, setDebts, pushLog, finResults, setFinResults }) => {
   const [closeModal, setCloseModal] = useState(null);
-  const [closeForm, setCloseForm] = useState({ file: null, date: "", comment: "" });
+  const [closeForm, setCloseForm] = useState({ file: null, date: "", comment: "", amount: "" });
   const [addModal, setAddModal] = useState(false);
-  const [form, setForm] = useState({ company: "", order: "", amount: 0, dueDate: "", currency: "RUB", upd: "" });
+  const [form, setForm] = useState({ company: "", order: "", amount: 0, dueDate: "", currency: "USD", upd: "" });
   const [viewDoc, setViewDoc] = useState(null);
-  const [tab, setTab] = useState("all"); // all | manual | auto
 
-  // Авто-дебиторка из Фин. результат (УПД есть, оплаты нет)
-  const autoDebts = useMemo(() => getAutoDebts(finResults || [], debts), [finResults, debts]);
-  const allDebts = useMemo(() => [...debts, ...autoDebts], [debts, autoDebts]);
-
-  const openD = allDebts.filter((d) => d.status === "open" && d.amount > 0 && !d.order?.includes("ИТОГО"));
+  const openD = debts.filter((d) => d.status === "open" && d.amount > 0);
   const closedD = debts.filter((d) => d.status === "closed");
-  const zeroD = debts.filter((d) => d.status === "open" && d.amount === 0);
-
-  // Фильтрация по вкладке
-  const filteredOpen = tab === "auto" ? openD.filter((d) => d.source === "auto") : tab === "manual" ? openD.filter((d) => d.source !== "auto") : openD;
 
   const totalDebt = openD.reduce((s, d) => s + d.amount, 0);
   const overdueItems = openD.filter((d) => d.dueDate && new Date(d.dueDate) < new Date());
   const overdueTotal = overdueItems.reduce((s, d) => s + d.amount, 0);
-  const autoCount = autoDebts.length;
 
   const grouped = {};
-  filteredOpen.forEach((d) => { if (!grouped[d.company]) grouped[d.company] = []; grouped[d.company].push(d); });
+  openD.forEach((d) => { if (!grouped[d.company]) grouped[d.company] = []; grouped[d.company].push(d); });
 
   const closeDebt = () => {
-    if (!closeModal || !closeForm.file) return;
+    if (!closeModal || !closeForm.file || !closeForm.amount) return;
     const reader = new FileReader();
     reader.onload = (e) => {
+      const payDocData = e.target.result;
+      const payAmount = parseFloat(closeForm.amount) || 0;
+
       pushLog({ type: "debt_close", id: closeModal.id, prev: { status: "open", payDoc: null, payDate: "", payComment: "" } });
-      setDebts((prev) => prev.map((d) => d.id === closeModal.id ? { ...d, status: "closed", payDoc: e.target.result, payDate: closeForm.date, payComment: closeForm.comment } : d));
+      setDebts((prev) => prev.map((d) => d.id === closeModal.id ? { ...d, status: "closed", payDoc: payDocData, payDate: closeForm.date, payComment: closeForm.comment } : d));
+
+      // Синхронизация: проставляем оплату в Фин. результат по совпадению PO
+      if (setFinResults && closeModal.order) {
+        setFinResults((prev) => prev.map((fr) => {
+          if (fr.customerPo === closeModal.order) {
+            return { ...fr, paymentFact: payAmount, paymentDoc: payDocData, paymentDate: closeForm.date };
+          }
+          return fr;
+        }));
+      }
+
       setCloseModal(null);
-      setCloseForm({ file: null, date: "", comment: "" });
+      setCloseForm({ file: null, date: "", comment: "", amount: "" });
     };
     reader.readAsDataURL(closeForm.file);
   };
@@ -2597,98 +2592,137 @@ const Debts = ({ debts, setDebts, pushLog, finResults }) => {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <StatCard title="Общая дебиторка" value={fmt(totalDebt, "$")} subtitle={`${openD.length} позиций`} icon="📋" color="amber" />
-        <StatCard title="Просрочено" value={fmt(overdueTotal, "$")} subtitle={`${overdueItems.length} позиций`} icon="⚠" color="red" />
-        <StatCard title="В срок" value={fmt(totalDebt - overdueTotal, "$")} subtitle="Текущая задолженность" icon="⏰" color="blue" />
-        <StatCard title="Авто (из Фин.рез.)" value={fmt(autoDebts.reduce((s, d) => s + d.amount, 0), "$")} subtitle={`${autoCount} позиций — УПД без оплаты`} icon="🔄" color="violet" />
+    <div className="space-y-4">
+      {/* Сводные карточки */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="bg-[#1E3A5F] rounded-xl p-4 border border-[#2A4A6F]">
+          <div className="flex items-start justify-between mb-2">
+            <span className="text-blue-200/70 text-xs font-medium uppercase tracking-wider">Общая дебиторка</span>
+            <span className="text-xl">📋</span>
+          </div>
+          <div className="text-2xl font-bold text-white tracking-tight">${fmt(totalDebt)}</div>
+          <div className="text-xs text-blue-300/60 mt-1">{openD.length} позиций</div>
+        </div>
+        <div className="bg-[#1E3A5F] rounded-xl p-4 border border-[#2A4A6F]">
+          <div className="flex items-start justify-between mb-2">
+            <span className="text-blue-200/70 text-xs font-medium uppercase tracking-wider">Просрочено</span>
+            <span className="text-xl">⚠️</span>
+          </div>
+          <div className="text-2xl font-bold text-rose-400 tracking-tight">${fmt(overdueTotal)}</div>
+          <div className="text-xs text-blue-300/60 mt-1">{overdueItems.length} позиций</div>
+        </div>
     </div>
 
+      {/* Фильтры */}
       <div className="flex items-center justify-between flex-wrap gap-3">
           <div>
-          <h2 className="text-lg font-semibold text-white">Открытые задолженности</h2>
-          <p className="text-xs text-slate-500">Для закрытия долга обязательно приложить платёжный документ из банка. Авто-записи формируются из Фин. результат (УПД есть, оплаты нет).</p>
+          <h2 className="text-lg font-semibold text-[#1E3A5F]">Открытые задолженности</h2>
+          <p className="text-xs text-gray-500">Для закрытия долга обязательно приложить платёжный документ из банка.</p>
           </div>
         <div className="flex items-center gap-2">
-          <div className="flex gap-1 bg-slate-800/60 p-1 rounded-lg">
-            {[
-              { k: "all", l: `Все (${openD.length})` },
-              { k: "manual", l: `Ручные (${openD.filter((d) => d.source !== "auto").length})` },
-              { k: "auto", l: `Авто (${autoCount})` },
-            ].map((f) => (
-              <button key={f.k} onClick={() => setTab(f.k)}
-                className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${
-                  tab === f.k ? "bg-blue-500 text-white" : "text-slate-400 hover:text-white hover:bg-slate-700"
-                }`}>{f.l}</button>
-            ))}
-          </div>
-          <button onClick={() => setAddModal(true)} className="px-4 py-2 bg-blue-500/20 hover:bg-blue-500/30 text-blue-300 rounded-lg text-sm font-medium border border-blue-500/30 transition-colors">+ Добавить</button>
+          <button onClick={() => setAddModal(true)} className="px-4 py-2 bg-[#1E3A5F] hover:bg-[#2A4A6F] text-white rounded-lg text-sm font-medium border border-[#2A4A6F] transition-colors">+ Добавить</button>
         </div>
           </div>
 
+      {/* Блоки по компаниям */}
+      {Object.keys(grouped).length === 0 && (
+        <div className="rounded-xl border border-[#1E3A5F]/20 bg-white p-8 text-center text-gray-400 text-sm">Нет открытых задолженностей</div>
+      )}
       {Object.entries(grouped).map(([company, items]) => {
-        const total = items.reduce((s, d) => s + d.amount, 0);
-        const hasAuto = items.some((d) => d.source === "auto");
+        const companyTotal = items.reduce((s, d) => s + d.amount, 0);
+        const companyOverdue = items.filter((d) => d.dueDate && new Date(d.dueDate) < new Date());
         return (
-          <Card key={company} className="overflow-hidden">
-            <div className={`${hasAuto ? "bg-violet-500/10" : "bg-rose-500/10"} px-5 py-3 flex justify-between items-center border-b border-slate-700/50`}>
-              <div className="flex items-center gap-2">
-                <div><h3 className="text-white font-semibold">{company}</h3><span className="text-xs text-slate-400">{items.length} позиций</span></div>
+          <div key={company} className="rounded-xl shadow-lg overflow-hidden border border-[#1E3A5F]/30 mb-4">
+            {/* Шапка компании */}
+            <div className="bg-[#1E3A5F] px-5 py-3 flex justify-between items-center">
+              <div className="flex items-center gap-3">
+                <h3 className="text-white font-semibold text-sm">{company}</h3>
+                <span className="text-blue-200/60 text-xs">{items.length} {items.length === 1 ? "позиция" : "позиций"}</span>
+                {companyOverdue.length > 0 && (
+                  <span className="px-2 py-0.5 bg-rose-500/30 text-rose-200 text-[10px] font-bold rounded-full">⚠️ {companyOverdue.length} просроч.</span>
+                )}
               </div>
-              <span className="text-lg font-bold text-rose-400">{fmt(total)} {items[0]?.currency}</span>
+              <span className="text-lg font-bold text-white tabular-nums">${fmt(companyTotal)}</span>
             </div>
-            <div className="divide-y divide-slate-700/30">
-              {items.map((d) => {
-                const overdue = d.dueDate && new Date(d.dueDate) < new Date();
-                const isAuto = d.source === "auto";
-                return (
-                  <div key={d.id} className={`px-5 py-3 flex justify-between items-center hover:bg-slate-700/20 transition-colors ${overdue ? "bg-rose-500/5" : ""} ${isAuto ? "border-l-2 border-l-violet-500" : ""}`}>
-            <div>
-                      <div className="text-slate-200 text-sm font-medium flex items-center gap-2">
-                        {d.order}
-                        {overdue && <StatusBadge status="overdue" />}
-                        {isAuto && <span className="px-1.5 py-0.5 bg-violet-500/20 text-violet-300 text-[10px] font-bold rounded border border-violet-500/30">АВТО</span>}
-                      </div>
-                      <div className="text-slate-500 text-xs mt-0.5">
-                        {d.upd && <span className="text-violet-400 mr-2">{d.upd}</span>}
-                        {d.dueDate && <span>Срок: {d.dueDate}</span>}
-                        {isAuto && d.orderDate && <span className="text-slate-500 ml-2">Дата заказа: {d.orderDate}</span>}
-                      </div>
-            </div>
-                    <div className="flex items-center gap-3">
-                      <span className={`font-bold ${overdue ? "text-rose-400" : "text-slate-200"}`}>{fmt(d.amount)} {d.currency}</span>
-                      {!isAuto && <button onClick={() => setCloseModal(d)} className="px-3 py-1.5 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 rounded-lg text-xs font-medium border border-emerald-500/30 transition-colors">Закрыть</button>}
-                      {isAuto && <span className="text-xs text-violet-400/70 italic">Закрытие через Фин.рез.</span>}
-                    </div>
-                  </div>
+            {/* Таблица внутри блока */}
+            <table className="w-full text-sm table-fixed">
+              <colgroup>
+                <col className="w-[15%]" />
+                <col className="w-[20%]" />
+                <col className="w-[15%]" />
+                <col className="w-[10%]" />
+                <col className="w-[20%]" />
+                <col className="w-[20%]" />
+              </colgroup>
+              <thead>
+                <tr className="bg-[#1E3A5F]/10 text-[#1E3A5F] text-left text-xs uppercase">
+                  <th className="py-2 px-4 font-semibold">Заказ</th>
+                  <th className="py-2 px-3 font-semibold">УПД</th>
+                  <th className="py-2 px-3 text-right font-semibold">Сумма</th>
+                  <th className="py-2 px-3 font-semibold">Валюта</th>
+                  <th className="py-2 px-3 font-semibold">Срок оплаты</th>
+                  <th className="py-2 px-3 font-semibold">Действия</th>
+                </tr>
+              </thead>
+              <tbody className="bg-white">
+                {items.map((d, idx) => {
+                  const overdue = d.dueDate && new Date(d.dueDate) < new Date();
+                  return (
+                    <tr key={d.id} className={`border-b border-gray-200 transition-colors hover:bg-blue-50 ${overdue ? "bg-red-200" : idx % 2 === 1 ? "bg-gray-50" : ""}`}>
+                      <td className="py-2.5 px-4 text-[#1E3A5F] font-mono text-xs font-medium">{d.order}</td>
+                      <td className="py-2.5 px-3 text-xs">
+                        {d.upd ? <span className="text-violet-600 font-medium">{d.upd}</span> : <span className="text-gray-400">—</span>}
+                      </td>
+                      <td className={`py-2.5 px-3 text-right font-mono text-xs font-bold ${overdue ? "text-rose-700" : "text-gray-900"}`}>${fmt(d.amount)}</td>
+                      <td className="py-2.5 px-3 text-gray-600 text-xs">{d.currency}</td>
+                      <td className="py-2.5 px-3 text-xs">
+                        {d.dueDate ? (
+                          <span className={overdue ? "text-rose-700 font-bold" : "text-gray-600"}>{d.dueDate} {overdue && "⚠️"}</span>
+                        ) : <span className="text-gray-400">—</span>}
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <button onClick={() => { setCloseModal(d); setCloseForm({ file: null, date: "", comment: "", amount: String(d.amount || "") }); }} className="px-3 py-1.5 bg-emerald-100 hover:bg-emerald-200 text-emerald-700 rounded-lg text-xs font-medium border border-emerald-300 transition-colors">✅ Закрыть</button>
+                      </td>
+                    </tr>
                 );
               })}
+              </tbody>
+            </table>
             </div>
-          </Card>
         );
       })}
 
-      {zeroD.length > 0 && (
-        <div>
-          <h3 className="text-slate-500 font-medium text-sm mb-2">Компании без текущей задолженности</h3>
-          <div className="flex flex-wrap gap-2">{zeroD.map((d) => (<span key={d.id} className="px-3 py-1 bg-slate-800/60 border border-slate-700/50 rounded-lg text-slate-400 text-sm">{d.company}</span>))}</div>
-        </div>
-      )}
-
+      {/* Закрытые */}
       {closedD.length > 0 && (
         <div>
-          <h3 className="text-emerald-400 font-medium text-sm mb-2">Закрытые ({closedD.length})</h3>
-          <div className="space-y-2">
-            {closedD.map((d) => (
-              <Card key={d.id} className="p-4 flex justify-between items-center opacity-60 border-l-4 border-emerald-500/40">
-                <div><div className="text-white font-medium">{d.company}</div><div className="text-slate-500 text-xs">{d.order} · Закрыт: {d.payDate}</div></div>
-            <div className="text-right">
-                  <div className="text-emerald-400 font-bold line-through">{fmt(d.amount)} {d.currency}</div>
-                  {d.payDoc && <button onClick={() => setViewDoc(d)} className="text-xs text-blue-400 hover:text-blue-300">📎 Документ</button>}
-            </div>
-              </Card>
-            ))}
+          <h3 className="text-emerald-700 font-medium text-sm mb-2">✅ Закрытые ({closedD.length})</h3>
+          <div className="rounded-xl shadow-sm overflow-hidden border border-emerald-200">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-emerald-50 text-emerald-800 text-left text-xs uppercase">
+                  <th className="py-2.5 px-4 font-semibold">Компания</th>
+                  <th className="py-2.5 px-3 font-semibold">Заказ</th>
+                  <th className="py-2.5 px-3 text-right font-semibold">Сумма</th>
+                  <th className="py-2.5 px-3 font-semibold">Дата закрытия</th>
+                  <th className="py-2.5 px-3 font-semibold">Документ</th>
+                </tr>
+              </thead>
+              <tbody className="bg-white">
+                {closedD.map((d, idx) => (
+                  <tr key={d.id} className={`border-b border-gray-100 ${idx % 2 === 1 ? "bg-gray-50" : ""}`}>
+                    <td className="py-2 px-4 text-gray-700 font-medium text-xs">{d.company}</td>
+                    <td className="py-2 px-3 text-gray-500 text-xs">{d.order}</td>
+                    <td className="py-2 px-3 text-right text-emerald-600 font-mono text-xs line-through">{fmt(d.amount)} {d.currency}</td>
+                    <td className="py-2 px-3 text-gray-500 text-xs">{d.payDate || "—"}</td>
+                    <td className="py-2 px-3">
+                      {d.payDoc ? (
+                        <button onClick={() => setViewDoc(d)} className="text-xs text-blue-600 hover:text-blue-800 font-medium">📎 Документ</button>
+                      ) : <span className="text-gray-400 text-xs">—</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
     </div>
         </div>
       )}
@@ -2697,10 +2731,13 @@ const Debts = ({ debts, setDebts, pushLog, finResults }) => {
         <div className="space-y-4">
           {closeModal && (
             <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-sm">
-              <div className="text-white font-medium">{closeModal.company} — {fmt(closeModal.amount)} {closeModal.currency}</div>
-              <div className="text-rose-400 font-medium mt-1 text-xs">⚠ Для закрытия ОБЯЗАТЕЛЬНО приложите банковский платёжный документ!</div>
+              <div className="text-white font-medium">{closeModal.company} — заказ {closeModal.order}</div>
+              <div className="text-white text-xs mt-1">Сумма долга: <span className="font-bold text-rose-400">${fmt(closeModal.amount)}</span> {closeModal.currency}</div>
+              <div className="text-rose-400 font-medium mt-2 text-xs">⚠ Для закрытия ОБЯЗАТЕЛЬНО приложите банковский платёжный документ!</div>
+              <div className="text-blue-300 text-xs mt-1">💡 Оплата автоматически проставится в Фин. результат</div>
             </div>
           )}
+          <InputField label="Сумма оплаты *" value={closeForm.amount} onChange={(v) => setCloseForm({ ...closeForm, amount: v })} type="number" placeholder="Сумма в валюте долга" />
           <div>
             <label className="text-xs text-slate-400 mb-1 block">Платёжный документ (PDF/JPG) *</label>
             <input type="file" accept=".pdf,.jpg,.jpeg,.png" onChange={(e) => setCloseForm({ ...closeForm, file: e.target.files[0] })} className="w-full text-sm text-slate-300" />
@@ -2710,7 +2747,7 @@ const Debts = ({ debts, setDebts, pushLog, finResults }) => {
           <InputField label="Комментарий" value={closeForm.comment} onChange={(v) => setCloseForm({ ...closeForm, comment: v })} />
           <div className="flex justify-end gap-3">
             <button onClick={() => setCloseModal(null)} className="px-4 py-2 text-slate-400 hover:text-white text-sm">Отмена</button>
-            <button onClick={closeDebt} disabled={!closeForm.file || !closeForm.date} className="px-6 py-2 bg-rose-500 hover:bg-rose-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors">Закрыть долг</button>
+            <button onClick={closeDebt} disabled={!closeForm.file || !closeForm.date || !closeForm.amount} className="px-6 py-2 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors">✅ Закрыть долг</button>
         </div>
       </div>
     </Modal>
@@ -2990,10 +3027,7 @@ export default function App() {
   };
 
   const activePO = openPo.filter((r) => r.status === "active").length;
-  // Считаем авто-дебиторку (из Фин. результат: УПД есть, оплаты нет)
-  const autoDebtsForCount = useMemo(() => getAutoDebts(finResults, debts), [finResults, debts]);
-  const allDebtsForCount = useMemo(() => [...debts, ...autoDebtsForCount], [debts, autoDebtsForCount]);
-  const openDebts = allDebtsForCount.filter((d) => d.status === "open" && d.amount > 0 && !d.order?.includes("ИТОГО")).length;
+  const openDebts = debts.filter((d) => d.status === "open" && d.amount > 0).length;
 
   const tabs = [
     { key: "dashboard", label: "Баланс", icon: "💰" },
@@ -3118,9 +3152,9 @@ export default function App() {
 
         <div className="p-6">
           {activeTab === "dashboard" && <Dashboard balances={balances} debts={debts} finResults={finResults} />}
-          {activeTab === "fin" && <FinResults data={finResults} setData={setFinResults} pushLog={pushLog} />}
+          {activeTab === "fin" && <FinResults data={finResults} setData={setFinResults} pushLog={pushLog} debts={debts} setDebts={setDebts} />}
           {activeTab === "openpo" && <OpenPO data={openPo} setData={setOpenPo} pushLog={pushLog} finResults={finResults} setFinResults={setFinResults} />}
-          {activeTab === "debts" && <Debts debts={debts} setDebts={setDebts} pushLog={pushLog} finResults={finResults} />}
+          {activeTab === "debts" && <Debts debts={debts} setDebts={setDebts} pushLog={pushLog} finResults={finResults} setFinResults={setFinResults} />}
           {activeTab === "infra" && <Infrastructure balances={balances} setBalances={setBalances} pushLog={pushLog} />}
           {activeTab === "import" && <BankImport balances={balances} setBalances={setBalances} />}
         </div>
