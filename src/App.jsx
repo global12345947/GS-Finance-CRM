@@ -25,6 +25,84 @@ const fmtShort = (n, currency = "") => {
   return (num < 0 ? "-" : "") + (currency ? currency + " " : "") + formatted;
 };
 
+// ==================== КАНБАН СТАДИИ ЗАКАЗА ====================
+const ORDER_STAGES = [
+  { key: "in_work", label: "Заказ в работе", color: "bg-sky-400", text: "text-sky-900", light: "bg-sky-100", border: "border-sky-400" },
+  { key: "placed", label: "Заказ размещен", color: "bg-orange-400", text: "text-orange-900", light: "bg-orange-100", border: "border-orange-400" },
+  { key: "compliance", label: "Прохождение Комплаенса", color: "bg-yellow-400", text: "text-yellow-900", light: "bg-yellow-100", border: "border-yellow-400" },
+  { key: "payment", label: "Заказ в Оплате", color: "bg-rose-400", text: "text-rose-900", light: "bg-rose-100", border: "border-rose-400" },
+  { key: "logistics", label: "Заказ в Логистике", color: "bg-violet-400", text: "text-violet-900", light: "bg-violet-100", border: "border-violet-400" },
+  { key: "done", label: "Заказ завершен", color: "bg-emerald-500", text: "text-emerald-900", light: "bg-emerald-100", border: "border-emerald-500" },
+];
+
+const KanbanDropdown = ({ order, setData, pushLog }) => {
+  const [open, setOpen] = useState(false);
+  const ref = React.useRef(null);
+
+  // Закрыть при клике вне
+  React.useEffect(() => {
+    if (!open) return;
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  const currentStage = ORDER_STAGES.find((s) => s.key === order.orderStage) || null;
+  const currentIdx = currentStage ? ORDER_STAGES.indexOf(currentStage) : -1;
+
+  const selectStage = (stage) => {
+    if (stage.key === order.orderStage) { setOpen(false); return; }
+    pushLog({ type: "po_stage", id: order.id, prev: order.orderStage || "" });
+    setData((prev) => prev.map((r) => (r.id === order.id ? { ...r, orderStage: stage.key } : r)));
+    setOpen(false);
+  };
+
+  return (
+    <div className="relative" ref={ref}>
+      <button onClick={(e) => { e.stopPropagation(); setOpen(!open); }}
+        className={`px-2 py-1 rounded text-[10px] font-semibold cursor-pointer transition-all hover:ring-2 hover:ring-blue-300 whitespace-nowrap ${
+          currentStage ? `${currentStage.light} ${currentStage.text} border ${currentStage.border}` : "bg-gray-100 text-gray-500 border border-gray-300"
+        }`}>
+        {currentStage ? currentStage.label : "Выбрать стадию"}
+      </button>
+
+      {open && (
+        <div className="absolute z-50 top-full mt-1 left-0 bg-white rounded-xl shadow-2xl border border-gray-200 p-2 min-w-[420px]"
+          onClick={(e) => e.stopPropagation()}>
+          <div className="text-[10px] text-gray-400 font-medium uppercase tracking-wider mb-2 px-1">Стадия заказа</div>
+          {/* Прогресс-бар */}
+          <div className="flex gap-0.5 mb-3 px-1">
+            {ORDER_STAGES.map((s, i) => (
+              <div key={s.key} className={`h-1.5 flex-1 rounded-full transition-all ${i <= currentIdx ? s.color : "bg-gray-200"}`} />
+            ))}
+          </div>
+          {/* Стадии */}
+          <div className="flex flex-col gap-1">
+            {ORDER_STAGES.map((s, i) => {
+              const isActive = s.key === order.orderStage;
+              const isPast = i < currentIdx;
+              return (
+                <button key={s.key} onClick={() => selectStage(s)}
+                  className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-all text-left ${
+                    isActive ? `${s.light} ${s.text} ring-2 ${s.border} ring-offset-1` 
+                    : isPast ? "bg-gray-50 text-gray-400"
+                    : "hover:bg-gray-50 text-gray-700"
+                  }`}>
+                  <div className={`w-3 h-3 rounded-full flex-shrink-0 ${isActive ? s.color : isPast ? "bg-gray-300" : "border-2 border-gray-300"}`}>
+                    {(isActive || isPast) && <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/></svg>}
+                  </div>
+                  <span className="flex-1">{s.label}</span>
+                  {isActive && <span className="text-[9px] font-bold uppercase tracking-wider opacity-60">Текущая</span>}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ==================== ПАРСЕР ДОСТАВКИ: план / факт ====================
 const parseDeliveryCost = (raw) => {
   if (!raw) return { plan: "", actual: "" };
@@ -1550,7 +1628,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                 <th className="py-2.5 px-2 text-left font-semibold">Оплата пост.</th>
                 <th className="py-2.5 px-2 text-left font-semibold">Плат. компания</th>
                 <th className="py-2.5 px-2 text-left font-semibold">Дост. план</th>
-                <th className="py-2.5 px-2 text-left font-semibold">Статус</th>
+                <th className="py-2.5 px-2 text-left font-semibold">Стадия</th>
                 <th className="py-2.5 px-2 text-left font-semibold">УПД</th>
                 <th className="py-2.5 px-2 text-center font-semibold">Действия</th>
               </tr>
@@ -1625,7 +1703,9 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                     </td>
                     <td className="py-2 px-2 text-gray-600 text-xs max-w-[80px] truncate">{o.payingCompany || "—"}</td>
                     <td className="py-2 px-2 text-gray-600 text-xs max-w-[80px] truncate">{parseDeliveryCost(o.deliveryCost).plan || "—"}</td>
-                    <td className="py-2 px-2"><StatusBadge status={o.status} /></td>
+                    <td className="py-2 px-2" onClick={(e) => e.stopPropagation()}>
+                      <KanbanDropdown order={o} setData={setData} pushLog={pushLog} />
+                    </td>
                     <td className="py-2 px-2 text-center">
                       {o.hasUpd ? (
                         <span className="text-emerald-600 text-xs cursor-help" title={`УПД №${o.updNum} от ${o.updDate}`}>
@@ -2333,6 +2413,7 @@ export default function App() {
     if (last.type === "po_edit") setOpenPo((prev) => prev.map((r) => (r.id === last.id ? { ...last.prev } : r)));
     if (last.type === "po_inline_edit") setOpenPo((prev) => prev.map((r) => (r.id === last.id ? { ...r, [last.field]: last.prev } : r)));
     if (last.type === "po_logistics") setOpenPo((prev) => prev.map((r) => (r.id === last.id ? { ...r, ...last.prev } : r)));
+    if (last.type === "po_stage") setOpenPo((prev) => prev.map((r) => (r.id === last.id ? { ...r, orderStage: last.prev } : r)));
     if (last.type === "debt_close") setDebts((prev) => prev.map((d) => (d.id === last.id ? { ...d, ...last.prev } : d)));
     if (last.type === "infra_payment") setBalances((prev) => prev.map((b) => (b.name === last.accName ? { ...b, balance: last.prev } : b)));
     setActionLog((prev) => prev.slice(0, -1));
