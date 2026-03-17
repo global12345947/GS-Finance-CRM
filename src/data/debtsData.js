@@ -1,7 +1,9 @@
-// Дебиторская задолженность — актуальные данные
-// Всего записей: 22 (без строк ИТОГО)
+// Дебиторская задолженность — актуальные данные (обновлено по новой таблице)
+// Всего записей: 23 (без строк ИТОГО)
+// Общая сумма: $923,979.33
 
 export const DEBTS_DATA = [
+  // A-tech — 10 заказов, итого $104,222.00
   {
     id: 1,
     company: "A-tech",
@@ -119,9 +121,10 @@ export const DEBTS_DATA = [
     payDate: "",
     payComment: "",
   },
+  // N-W Aircompany — 1 заказ, итого $530,000.00
   {
     id: 10,
-    company: "N-W",
+    company: "N-W Aircompany",
     order: "2026-224 R0",
     amount: 530000,
     dueDate: "",
@@ -132,6 +135,7 @@ export const DEBTS_DATA = [
     payDate: "",
     payComment: "",
   },
+  // Utair — 9 заказов, итого $140,632.33
   {
     id: 11,
     company: "Utair",
@@ -249,6 +253,7 @@ export const DEBTS_DATA = [
     payDate: "",
     payComment: "",
   },
+  // S7 — 1 заказ, итого $5,625.00
   {
     id: 20,
     company: "S7",
@@ -262,6 +267,7 @@ export const DEBTS_DATA = [
     payDate: "",
     payComment: "",
   },
+  // Belavia — 3 дополнения, итого $143,500.00
   {
     id: 21,
     company: "Belavia",
@@ -280,6 +286,19 @@ export const DEBTS_DATA = [
     company: "Belavia",
     order: "ДОПОЛНЕНИЕ № 10",
     amount: 82300,
+    dueDate: "",
+    upd: "",
+    currency: "USD",
+    status: "open",
+    payDoc: null,
+    payDate: "",
+    payComment: "",
+  },
+  {
+    id: 23,
+    company: "Belavia",
+    order: "ДОПОЛНЕНИЕ № 7",
+    amount: 15600,
     dueDate: "",
     upd: "",
     currency: "USD",

@@ -93,32 +93,41 @@ const KanbanDropdown = ({ order, setData, pushLog, syncUpdToFinResults }) => {
   };
 
   const confirmComplete = () => {
-    const hasUpd = !!(updForm.updNum && updForm.updDate);
-    if (!hasUpd && !updForm.noGS) return; // нельзя завершить без УПД или галочки
-    pushLog({ type: "po_stage", id: order.id, prev: order.orderStage || "", prevStatus: order.status || "active" });
-    const updates = { orderStage: "done", status: "completed" };
-    if (hasUpd) {
-      updates.hasUpd = true;
-      updates.updNum = updForm.updNum;
-      updates.updDate = updForm.updDate;
-      updates.updFile = updForm.updFile;
-      updates.noGlobalSmart = false;
-    }
+    const hasUpd = !!(updForm.updNum && updForm.updDate && updForm.updFile);
+    if (!hasUpd && !updForm.noGS) return; // нельзя завершить без УПД (номер + дата + скан) или галочки «без GS»
+
+    const applyComplete = (fileData) => {
+      pushLog({ type: "po_stage", id: order.id, prev: order.orderStage || "", prevStatus: order.status || "active" });
+      const updates = { orderStage: "done", status: "completed" };
+      if (!updForm.noGS) {
+        updates.hasUpd = true;
+        updates.updNum = updForm.updNum;
+        updates.updDate = updForm.updDate;
+        updates.updFile = fileData;
+        updates.noGlobalSmart = false;
+      }
+      if (updForm.noGS) {
+        updates.noGlobalSmart = true;
+        updates.hasUpd = true;
+        updates.updNum = "Без участия GS";
+        updates.updDate = "";
+        updates.updFile = null;
+      }
+      setData((prev) => prev.map((r) => (r.id === order.id ? { ...r, ...updates } : r)));
+      if (syncUpdToFinResults) {
+        syncUpdToFinResults(order.internalPo, true, updates.updNum, updates.updDate, updates.updFile, updates.noGlobalSmart);
+      }
+      setCompleteModal(false);
+    };
+
     if (updForm.noGS) {
-      updates.noGlobalSmart = true;
-      updates.hasUpd = true; // помечаем как «завершён» для фильтров
-      updates.updNum = "Без участия GS";
-      updates.updDate = "";
-      updates.updFile = null;
+      applyComplete(null);
+    } else {
+      applyComplete(updForm.updFile);
     }
-    setData((prev) => prev.map((r) => (r.id === order.id ? { ...r, ...updates } : r)));
-    if (syncUpdToFinResults) {
-      syncUpdToFinResults(order.internalPo, true, updates.updNum, updates.updDate, updates.updFile, updates.noGlobalSmart);
-    }
-    setCompleteModal(false);
   };
 
-  const canComplete = !!(updForm.updNum && updForm.updDate) || updForm.noGS;
+  const canComplete = !!(updForm.updNum && updForm.updDate && updForm.updFile) || updForm.noGS;
 
   const handleToggle = (e) => {
     e.stopPropagation();
@@ -217,7 +226,7 @@ const KanbanDropdown = ({ order, setData, pushLog, syncUpdToFinResults }) => {
                 </div>
               </div>
               <div>
-                <label className="text-xs text-slate-400 mb-1 block">Скан УПД (PDF/JPG/PNG)</label>
+                <label className={`text-xs text-slate-400 mb-1 block ${updForm.noGS ? "opacity-40" : ""}`}>Скан УПД (PDF/JPG/PNG) *</label>
                 <input type="file" accept=".pdf,.jpg,.jpeg,.png"
                   disabled={updForm.noGS}
                   onChange={(e) => {
@@ -228,6 +237,9 @@ const KanbanDropdown = ({ order, setData, pushLog, syncUpdToFinResults }) => {
                     reader.readAsDataURL(file);
                   }}
                   className={`w-full text-xs text-slate-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:text-xs file:font-medium file:bg-blue-500 file:text-white file:cursor-pointer hover:file:bg-blue-600 ${updForm.noGS ? "opacity-40" : ""}`} />
+                {!updForm.noGS && !updForm.updFile && (
+                  <p className="text-[10px] text-rose-400 mt-1">⚠ Без скана УПД заказ завершить нельзя</p>
+                )}
               </div>
             </div>
 
@@ -289,6 +301,7 @@ const parseExternalPOs = (order) => {
   const amounts = (order.supplierAmounts || "").split("\n").map((s) => s.trim()).filter(Boolean);
   const datesPlaced = (order.datePlacedSupplier || "").split("\n").map((s) => s.trim()).filter(Boolean);
   const procurements = (order.respProcurement || "").split("\n").map((s) => s.trim()).filter(Boolean);
+  const logistics = (order.logisticsPlan || "").split("\n").map((s) => s.trim()).filter(Boolean);
   const count = Math.max(refs.length, 1);
   const result = [];
   for (let i = 0; i < count; i++) {
@@ -302,6 +315,7 @@ const parseExternalPOs = (order) => {
       supplierAmount: amounts[i] || "",
       datePlaced: datesPlaced[i] || (datesPlaced.length === 1 ? datesPlaced[0] : ""),
       respProcurement: procurements[i] || (procurements.length === 1 ? procurements[0] : ""),
+      logisticsPlan: logistics[i] || (logistics.length === 1 ? logistics[0] : ""),
       cancelled,
       cancelReason: "",
     });
@@ -331,9 +345,186 @@ const parseDeliveryCost = (raw) => {
   return { plan, actual };
 };
 
+// ==================== ФИЛЬТР КОЛОНОК (Google Sheets style) ====================
+const getPoFilterValue = (o, colKey) => {
+  switch (colKey) {
+    case "num": return [o.num || "(пусто)"];
+    case "customer": return [o.customer || "(пусто)"];
+    case "internalPo": return [o.internalPo || "(пусто)"];
+    case "dateOrdered": return [o.dateOrdered || "(пусто)"];
+    case "customerDeadline": return [o.customerDeadline || "(пусто)"];
+    case "customerAmount": return [o.customerAmount ? "$" + fmt(o.customerAmount) : "(пусто)"];
+    case "paymentStatusCustomer": return [o.paymentStatusCustomer || "(пусто)"];
+    case "internalPoRef": {
+      const vals = (o.internalPoRef || "").split("\n").map((s) => s.trim()).filter(Boolean);
+      return vals.length ? vals : ["(пусто)"];
+    }
+    case "supplierName": {
+      const vals = (o.supplierName || "").split("\n").map((s) => s.trim()).filter(Boolean);
+      return vals.length ? vals : ["(пусто)"];
+    }
+    case "supplierAmount": return [o.supplierAmount ? "$" + fmt(o.supplierAmount) : "(пусто)"];
+    case "paymentStatusSupplier": {
+      const vals = (o.paymentStatusSupplier || "").split("\n").map((s) => s.trim()).filter(Boolean);
+      return vals.length ? vals : ["(пусто)"];
+    }
+    case "payingCompany": {
+      const vals = (o.payingCompany || "").split("\n").map((s) => s.trim()).filter(Boolean);
+      return vals.length ? vals : ["(пусто)"];
+    }
+    case "deliveryPlan": return [parseDeliveryCost(o.deliveryCost).plan || "(пусто)"];
+    case "orderStage": {
+      const s = ORDER_STAGES.find((st) => st.key === o.orderStage);
+      return [s ? s.label : "(не указана)"];
+    }
+    case "upd": return [o.noGlobalSmart ? "Без участия GS" : o.hasUpd ? "Есть УПД" : "Нет УПД"];
+    default: return ["(пусто)"];
+  }
+};
+
+const ColumnFilterDropdown = ({ values, selected, onApply, onClear, onClose }) => {
+  const [search, setSearch] = useState("");
+  const [localSelected, setLocalSelected] = useState(() => new Set(selected || []));
+  const dropRef = React.useRef(null);
+
+  React.useEffect(() => {
+    const handler = (e) => {
+      if (dropRef.current && !dropRef.current.contains(e.target)) onClose();
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [onClose]);
+
+  const filtered = search
+    ? values.filter((v) => v.toLowerCase().includes(search.toLowerCase()))
+    : values;
+  const allChecked = filtered.length > 0 && filtered.every((v) => localSelected.has(v));
+
+  const toggleAll = () => {
+    const next = new Set(localSelected);
+    if (allChecked) filtered.forEach((v) => next.delete(v));
+    else filtered.forEach((v) => next.add(v));
+    setLocalSelected(next);
+  };
+
+  const toggle = (v) => {
+    const next = new Set(localSelected);
+    if (next.has(v)) next.delete(v); else next.add(v);
+    setLocalSelected(next);
+  };
+
+  return (
+    <div ref={dropRef} onClick={(e) => e.stopPropagation()}
+      className="absolute top-full left-0 mt-1 bg-white rounded-lg shadow-2xl border border-gray-200 z-[200] min-w-[220px] max-w-[320px]"
+      style={{ maxHeight: "360px" }}>
+      <div className="p-2 border-b border-gray-100">
+        <input type="text" value={search} onChange={(e) => setSearch(e.target.value)}
+          placeholder="Поиск..."
+          className="w-full px-2 py-1.5 text-xs border border-gray-200 rounded focus:outline-none focus:border-blue-400 text-gray-700"
+          autoFocus />
+      </div>
+      <div className="px-2 py-1.5 border-b border-gray-100">
+        <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer hover:text-gray-900 select-none">
+          <input type="checkbox" checked={allChecked} onChange={toggleAll} className="rounded accent-[#1E3A5F]" />
+          Выбрать все ({filtered.length})
+        </label>
+      </div>
+      <div className="overflow-y-auto p-1" style={{ maxHeight: "220px" }}>
+        {filtered.map((v) => (
+          <label key={v} className="flex items-center gap-2 px-2 py-1 text-xs text-gray-700 cursor-pointer hover:bg-gray-50 rounded select-none">
+            <input type="checkbox" checked={localSelected.has(v)} onChange={() => toggle(v)} className="rounded accent-[#1E3A5F]" />
+            <span className="truncate">{v}</span>
+          </label>
+        ))}
+        {filtered.length === 0 && <div className="text-xs text-gray-400 px-2 py-3 text-center">Нет совпадений</div>}
+      </div>
+      <div className="flex items-center justify-between p-2 border-t border-gray-100 gap-2">
+        <button onClick={() => { onClear(); onClose(); }}
+          className="px-3 py-1.5 text-xs text-gray-500 hover:text-red-600 transition-colors">Сбросить</button>
+        <button onClick={() => { onApply(localSelected); onClose(); }}
+          className="px-4 py-1.5 bg-[#1E3A5F] text-white text-xs rounded-md hover:bg-[#2A4A6F] font-medium transition-colors">OK</button>
+      </div>
+    </div>
+  );
+};
+
 // ==================== АВТО-ДЕБИТОРКА (из Фин. результат) ====================
 // Заказы с УПД, но без оплаты — автоматически попадают в дебиторку
-// getAutoDebts удалена — дебиторка теперь ТОЛЬКО из ручных данных (debtsData.js)
+
+// Парсим NET дни из paymentStatusCustomer (NET 5, NET 7, NET 10, NET 30)
+const parseNetDays = (paymentStatus) => {
+  if (!paymentStatus) return 0;
+  const match = paymentStatus.match(/NET\s*(\d+)/i);
+  return match ? parseInt(match[1], 10) : 0;
+};
+
+// Считаем дату оплаты: дата УПД + NET дней
+const calcDueDate = (updDate, netDays) => {
+  if (!updDate || !netDays) return "";
+  // Парсим дату (формат DD.MM.YYYY или YYYY-MM-DD)
+  let d;
+  if (updDate.includes(".")) {
+    const [day, month, year] = updDate.split(".");
+    d = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
+  } else {
+    d = new Date(updDate);
+  }
+  if (isNaN(d.getTime())) return "";
+  d.setDate(d.getDate() + netDays);
+  return d.toISOString().split("T")[0]; // YYYY-MM-DD
+};
+
+// Считаем дни до/после срока
+const calcDaysRemaining = (dueDate) => {
+  if (!dueDate) return null;
+  const due = new Date(dueDate);
+  if (isNaN(due.getTime())) return null;
+  const now = new Date();
+  now.setHours(0, 0, 0, 0);
+  due.setHours(0, 0, 0, 0);
+  return Math.ceil((due - now) / (1000 * 60 * 60 * 24));
+};
+
+const getAutoDebts = (finResults, existingDebts, openPoData) => {
+  const existingOrders = new Set(existingDebts.map((d) => d.order));
+  // Маппинг PO → paymentStatusCustomer из Open PO
+  const poMap = {};
+  (openPoData || []).forEach((po) => { poMap[po.internalPo] = po; });
+
+  return finResults
+    .filter((r) => {
+      if (!r.hasUpd) return false;
+      if (r.status === "cancelled") return false;
+      if (r.noGlobalSmart) return false;
+      const pf = typeof r.paymentFact === "number" ? r.paymentFact : parseFloat(r.paymentFact) || 0;
+      if (pf > 0) return false;
+      // Не дублировать с ручными долгами
+      if (existingOrders.has(r.customerPo)) return false;
+      return true;
+    })
+    .map((r) => {
+      const po = poMap[r.customerPo] || {};
+      const payStatus = po.paymentStatusCustomer || "";
+      const netDays = parseNetDays(payStatus);
+      const updDate = r.updDate || po.updDate || "";
+      const dueDate = netDays > 0 ? calcDueDate(updDate, netDays) : "";
+
+      return {
+        id: `auto_${r.id}`,
+        company: r.customer,
+        order: r.customerPo,
+        amount: r.customerAmount || 0,
+        dueDate,
+        currency: "USD",
+        status: "open",
+        payDoc: null,
+        payDate: "",
+        payComment: "",
+        source: "auto",
+        finResultId: r.id,
+      };
+    });
+};
 
 // ==================== UI КОМПОНЕНТЫ ====================
 const StatusBadge = ({ status }) => {
@@ -474,7 +665,7 @@ const TabBar = ({ tabs, active, onChange }) => (
 );
 
 // ==================== БАЛАНС ====================
-const Dashboard = ({ balances, debts, finResults }) => {
+const Dashboard = ({ balances, debts, finResults, openPo }) => {
   const [expandedGroup, setExpandedGroup] = useState(null);
 
   // Группируем балансы по инфраструктуре
@@ -527,18 +718,22 @@ const Dashboard = ({ balances, debts, finResults }) => {
     return { usd, aed, bat };
   }, [balances]);
 
+  // Авто-дебиторка для дашборда
+  const autoDebtsDash = useMemo(() => getAutoDebts(finResults || [], debts, openPo || []), [finResults, debts, openPo]);
+  const allDebtsDash = useMemo(() => [...debts, ...autoDebtsDash], [debts, autoDebtsDash]);
+
   // Просроченные дебиторки
   const overdueTotal = useMemo(() => {
-    const overdueDebts = debts.filter(
+    const overdueDebts = allDebtsDash.filter(
       (d) => d.status === "open" && d.amount > 0 && d.dueDate && new Date(d.dueDate) < new Date()
     );
     return overdueDebts.reduce((s, d) => s + d.amount, 0);
-  }, [debts]);
+  }, [allDebtsDash]);
 
   // Общая дебиторка
   const totalDebtDash = useMemo(() => {
-    return debts.filter((d) => d.status === "open" && d.amount > 0).reduce((s, d) => s + d.amount, 0);
-  }, [debts]);
+    return allDebtsDash.filter((d) => d.status === "open" && d.amount > 0).reduce((s, d) => s + d.amount, 0);
+  }, [allDebtsDash]);
 
   const fmtCell = (val, prefix = "") => {
     if (val === null || val === undefined) return <span className="text-gray-300">—</span>;
@@ -722,6 +917,7 @@ const Dashboard = ({ balances, debts, finResults }) => {
 const FIN_STAGES = [
   { key: "active", label: "В работе", color: "bg-blue-500", text: "text-blue-800", light: "bg-blue-100", border: "border-blue-400" },
   { key: "completed", label: "Выполнен", color: "bg-emerald-500", text: "text-emerald-800", light: "bg-emerald-100", border: "border-emerald-500" },
+  { key: "cancelled", label: "Отменён", color: "bg-red-500", text: "text-red-800", light: "bg-red-100", border: "border-red-400" },
 ];
 
 const FinStatusDropdown = ({ order, onChangeStatus }) => {
@@ -863,6 +1059,15 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
         return;
       }
     }
+    if (newStatus === "cancelled") {
+      const reason = prompt("Укажите причину отмены заказа:");
+      if (!reason || !reason.trim()) return;
+      pushLog({ type: "fin_status", id: r.id, prev: r.status });
+      const prevComment = r.comment || "";
+      const newComment = prevComment ? `${prevComment}\n⛔ Отменён: ${reason.trim()}` : `⛔ Отменён: ${reason.trim()}`;
+      setData((prev) => prev.map((x) => (x.id === r.id ? { ...x, status: "cancelled", comment: newComment } : x)));
+      return;
+    }
     pushLog({ type: "fin_status", id: r.id, prev: r.status });
     setData((prev) => prev.map((x) => (x.id === r.id ? { ...x, status: newStatus } : x)));
   };
@@ -982,6 +1187,7 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
             { k: "all", l: "Все" },
             { k: "active", l: "В работе" },
             { k: "completed", l: "Выполнены" },
+            { k: "cancelled", l: "Отменённые" },
             { k: "upd", l: "С УПД" },
             { k: "no_upd", l: "Без УПД" },
           ].map((f) => (
@@ -1602,6 +1808,12 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
   const [cancelModal, setCancelModal] = useState(null);
   const [cancelReason, setCancelReason] = useState("");
   const [showAdd, setShowAdd] = useState(false);
+  // Колоночные фильтры (Google Sheets style)
+  const [columnFilters, setColumnFilters] = useState({});
+  const [openFilter, setOpenFilter] = useState(null);
+  const activeFilterCount = Object.values(columnFilters).filter((s) => s.size > 0).length;
+  const clearAllColumnFilters = () => { setColumnFilters({}); setPage(-1); };
+
   // Раскрытые строки (логистическая панель)
   const [expandedRows, setExpandedRows] = useState(new Set());
   const toggleExpand = (id) => {
@@ -1664,19 +1876,34 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
     dateCustomerPaid: "",
     deliveryCost: 0, awb: "", tracking: "", comments: "", mgmtComments: "",
     type: "domestic",
-    externalOrders: [{ po: "", supplier: "", supplierAmount: 0, payment: "", payingCompany: "", datePlaced: "", respProcurement: "", cancelled: false }],
+    externalOrders: [{ po: "", supplier: "", supplierAmount: 0, payment: "", payingCompany: "", datePlaced: "", respProcurement: "", logisticsPlan: "", cancelled: false }],
   });
   const PP = 30;
 
+  const FILTER_COL_KEYS = ["num", "customer", "internalPo", "dateOrdered", "customerDeadline",
+    "customerAmount", "paymentStatusCustomer", "internalPoRef", "supplierName", "supplierAmount",
+    "paymentStatusSupplier", "payingCompany", "deliveryPlan", "orderStage", "upd"];
+
+  const uniqueValuesMap = useMemo(() => {
+    let pool = [...data];
+    if (typeFilter === "domestic") pool = pool.filter((o) => o.type === "domestic");
+    if (typeFilter === "export") pool = pool.filter((o) => o.type === "export");
+    if (typeFilter === "yoon") pool = pool.filter((o) => o.type === "yoon");
+    const map = {};
+    FILTER_COL_KEYS.forEach((col) => {
+      const vals = new Set();
+      pool.forEach((o) => getPoFilterValue(o, col).forEach((v) => vals.add(v)));
+      map[col] = [...vals].sort();
+    });
+    return map;
+  }, [data, typeFilter]);
+
   const filtered = useMemo(() => {
     let items = [...data];
-    // Сортировка по дате: от старого к новому
     items.sort((a, b) => (a.dateOrdered || "").localeCompare(b.dateOrdered || ""));
-    // Фильтр по типу (ROT / EXP / YOON)
     if (typeFilter === "domestic") items = items.filter((o) => o.type === "domestic");
     if (typeFilter === "export") items = items.filter((o) => o.type === "export");
     if (typeFilter === "yoon") items = items.filter((o) => o.type === "yoon");
-    // Фильтр по статусу
     if (filter === "active") items = items.filter((o) => o.status === "active");
     if (filter === "completed") items = items.filter((o) => o.status === "completed");
     if (filter === "cancelled") items = items.filter((o) => o.status === "cancelled");
@@ -1694,8 +1921,15 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
           o.mgmtComments?.toLowerCase().includes(q)
       );
     }
+    Object.entries(columnFilters).forEach(([colKey, selectedSet]) => {
+      if (!selectedSet || selectedSet.size === 0) return;
+      items = items.filter((o) => {
+        const vals = getPoFilterValue(o, colKey);
+        return vals.some((v) => selectedSet.has(v));
+      });
+    });
     return items;
-  }, [data, filter, typeFilter, search]);
+  }, [data, filter, typeFilter, search, columnFilters]);
 
   const pages = Math.ceil(filtered.length / PP);
   const effectivePage = page === -1 ? Math.max(0, pages - 1) : page;
@@ -1703,7 +1937,8 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
 
   const doUpd = () => {
     if (!updModal) return;
-    if (!updForm.noGS && !updForm.file) return;
+    // Для обычных заказов — обязательны номер УПД, дата и скан
+    if (!updForm.noGS && (!updForm.file || !updForm.num || !updForm.date)) return;
 
     const applyPoUpdate = (fileData) => {
       pushLog({
@@ -1810,6 +2045,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
       payingCompany: exts.map((e) => e.payingCompany).join("\n"),
       datePlacedSupplier: exts.map((e) => e.datePlaced).join("\n"),
       respProcurement: exts.map((e) => e.respProcurement).join("\n"),
+      logisticsPlan: exts.map((e) => e.logisticsPlan).join("\n"),
     };
     // Автозапись причин отмены ext PO в комментарии
     const prevExts = parseExternalPOs(editModal);
@@ -1846,7 +2082,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
     setEditModal(null);
   };
 
-  const emptyExtPO = { po: "", supplier: "", supplierAmount: 0, payment: "", payingCompany: "", datePlaced: "", respProcurement: "", cancelled: false, cancelReason: "" };
+  const emptyExtPO = { po: "", supplier: "", supplierAmount: 0, payment: "", payingCompany: "", datePlaced: "", respProcurement: "", logisticsPlan: "", cancelled: false, cancelReason: "" };
   const handleAddPO = () => {
     const id = Math.max(...data.map((o) => o.id), 0) + 1;
     const num = String(data.length + 1);
@@ -1864,6 +2100,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
       payingCompany: exts.map((e) => e.payingCompany).join("\n"),
       datePlacedSupplier: exts.map((e) => e.datePlaced).join("\n"),
       respProcurement: exts.map((e) => e.respProcurement).join("\n"),
+      logisticsPlan: exts.map((e) => e.logisticsPlan).join("\n"),
     };
     // Автозапись причин отмены ext PO в комментарии нового заказа
     const cancelComments = exts
@@ -1962,6 +2199,13 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
           className="px-4 py-2 bg-[#1E3A5F] hover:bg-[#2A4A6F] text-white rounded-lg text-sm font-medium transition-colors">
           + Новый PO
         </button>
+        {activeFilterCount > 0 && (
+          <button onClick={clearAllColumnFilters}
+            className="px-3 py-2 bg-amber-100 text-amber-800 rounded-lg text-xs font-medium hover:bg-amber-200 transition-colors flex items-center gap-1.5">
+            <span>Фильтры ({activeFilterCount})</span>
+            <span className="text-amber-600">✕</span>
+          </button>
+        )}
         <span className="text-xs text-gray-500 font-medium">{filtered.length} записей</span>
     </div>
 
@@ -1972,21 +2216,48 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
             <thead>
               <tr className="bg-[#1E3A5F] text-white">
                 <th className="py-2.5 px-1 text-center font-semibold w-7"></th>
-                <th className="py-2.5 px-2 text-left font-semibold">№</th>
-                <th className="py-2.5 px-2 text-left font-semibold">Клиент</th>
-                <th className="py-2.5 px-2 text-left font-semibold">PO</th>
-                <th className="py-2.5 px-2 text-left font-semibold">Дата</th>
-                <th className="py-2.5 px-2 text-left font-semibold">Дедлайн</th>
-                <th className="py-2.5 px-2 text-right font-semibold">Сумма $</th>
-                <th className="py-2.5 px-2 text-left font-semibold">Оплата клиента</th>
-                <th className="py-2.5 px-2 text-left font-semibold">External PO</th>
-                <th className="py-2.5 px-2 text-left font-semibold">Поставщик</th>
-                <th className="py-2.5 px-2 text-right font-semibold">Сумма пост.</th>
-                <th className="py-2.5 px-2 text-left font-semibold">Оплата пост.</th>
-                <th className="py-2.5 px-2 text-left font-semibold">Плат. компания</th>
-                <th className="py-2.5 px-2 text-left font-semibold">Дост. план</th>
-                <th className="py-2.5 px-2 text-left font-semibold">Стадия</th>
-                <th className="py-2.5 px-2 text-left font-semibold">УПД</th>
+                {[
+                  { key: "num", label: "№", align: "text-left" },
+                  { key: "customer", label: "Клиент", align: "text-left" },
+                  { key: "internalPo", label: "PO", align: "text-left" },
+                  { key: "dateOrdered", label: "Дата", align: "text-left" },
+                  { key: "customerDeadline", label: "Дедлайн", align: "text-left" },
+                  { key: "customerAmount", label: "Сумма $", align: "text-right" },
+                  { key: "paymentStatusCustomer", label: "Оплата клиента", align: "text-left" },
+                  { key: "internalPoRef", label: "External PO", align: "text-left" },
+                  { key: "supplierName", label: "Поставщик", align: "text-left" },
+                  { key: "supplierAmount", label: "Сумма пост.", align: "text-right" },
+                  { key: "paymentStatusSupplier", label: "Оплата пост.", align: "text-left" },
+                  { key: "payingCompany", label: "Плат. компания", align: "text-left" },
+                  { key: "deliveryPlan", label: "Дост. план", align: "text-left" },
+                  { key: "orderStage", label: "Стадия", align: "text-left" },
+                  { key: "upd", label: "УПД", align: "text-left" },
+                ].map((col) => {
+                  const isActive = columnFilters[col.key]?.size > 0;
+                  const isOpen = openFilter === col.key;
+                  return (
+                    <th key={col.key} className={`py-2.5 px-2 font-semibold relative ${col.align}`}>
+                      <div className={`flex items-center gap-1 ${col.align === "text-right" ? "justify-end" : ""}`}>
+                        <span>{col.label}</span>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setOpenFilter(isOpen ? null : col.key); }}
+                          className={`shrink-0 w-4 h-4 flex items-center justify-center rounded text-[8px] transition-all ${
+                            isActive ? "bg-yellow-400 text-[#1E3A5F]" : "text-white/40 hover:text-white hover:bg-white/20"
+                          }`}
+                          title="Фильтр колонки">▼</button>
+                      </div>
+                      {isOpen && (
+                        <ColumnFilterDropdown
+                          values={uniqueValuesMap[col.key] || []}
+                          selected={columnFilters[col.key]}
+                          onApply={(sel) => { setColumnFilters((prev) => ({ ...prev, [col.key]: sel })); setPage(-1); }}
+                          onClear={() => { setColumnFilters((prev) => { const next = { ...prev }; delete next[col.key]; return next; }); setPage(-1); }}
+                          onClose={() => setOpenFilter(null)}
+                        />
+                      )}
+                    </th>
+                  );
+                })}
                 <th className="py-2.5 px-2 text-center font-semibold">Действия</th>
               </tr>
             </thead>
@@ -2019,20 +2290,21 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                     <td className="py-2 px-2 text-gray-600 whitespace-nowrap">{o.dateOrdered || "—"}</td>
                     <td className="py-2 px-2 text-gray-600 whitespace-nowrap text-xs">{o.customerDeadline || "—"}</td>
                     <td className="py-2 px-2 text-right text-gray-900 font-semibold tabular-nums whitespace-nowrap">${fmt(o.customerAmount)}</td>
-                    <td className="py-2 px-2 max-w-[120px]" onClick={(e) => e.stopPropagation()}>
+                    <td className="py-2 px-2 max-w-[120px] relative" onClick={(e) => e.stopPropagation()}>
                       {inlineEdit && inlineEdit.id === o.id && inlineEdit.field === "paymentStatusCustomer" ? (
-                        <div className="flex items-center gap-1">
-                          <input type="text" value={inlineEdit.value} autoFocus
-                            onChange={(e) => setInlineEdit({ ...inlineEdit, value: e.target.value })}
-                            onKeyDown={(e) => { if (e.key === "Enter") saveInlineEdit(); if (e.key === "Escape") cancelInlineEdit(); }}
-                            className="w-full px-1.5 py-0.5 text-[11px] border border-blue-400 rounded bg-white focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                          <button onClick={saveInlineEdit} className="text-emerald-600 text-xs font-bold hover:text-emerald-800" title="Сохранить">✓</button>
-                          <button onClick={cancelInlineEdit} className="text-red-400 text-xs font-bold hover:text-red-600" title="Отмена">✕</button>
+                        <div className="absolute z-50 top-0 left-0 bg-white rounded-lg shadow-xl border border-gray-200 py-1 min-w-[130px]">
+                          {["Paid", "Not paid", "NET 5", "NET 7", "NET 10", "NET 30"].map((opt) => (
+                            <button key={opt} onClick={() => { pushLog({ type: "po_inline_edit", id: o.id, field: "paymentStatusCustomer", prev: o.paymentStatusCustomer || "" }); setData((prev) => prev.map((x) => x.id === o.id ? { ...x, paymentStatusCustomer: opt } : x)); setInlineEdit(null); }}
+                              className={`w-full text-left px-3 py-1.5 text-xs font-medium hover:bg-gray-100 transition-colors ${opt === "Paid" ? "text-emerald-700" : "text-amber-700"}`}>
+                              {opt === "Paid" ? "✅ " : "🟡 "}{opt}
+                            </button>
+                          ))}
+                          <button onClick={cancelInlineEdit} className="w-full text-left px-3 py-1.5 text-xs text-gray-400 hover:bg-gray-100 border-t border-gray-100">Отмена</button>
                       </div>
                       ) : (
                         <span onClick={() => startInlineEdit(o, "paymentStatusCustomer")}
                           className={`px-1.5 py-0.5 rounded text-[10px] font-medium cursor-pointer hover:ring-2 hover:ring-blue-300 transition-all ${isPaid ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}
-                          title="Нажмите для редактирования">
+                          title="Нажмите для выбора">
                           {(o.paymentStatusCustomer || "—").substring(0, 20)}
                         </span>
                       )}
@@ -2070,15 +2342,23 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                             : amounts.length === 1 ? "$" + fmt(parseFloat(amounts[0]) || 0)
                             : o.supplierAmount ? "$" + fmt(o.supplierAmount) : "—"}
                         </td>
-                        <td className="py-2 px-2 max-w-[120px]" onClick={(e) => e.stopPropagation()}>
+                        <td className="py-2 px-2 max-w-[120px] relative" onClick={(e) => e.stopPropagation()}>
                           {inlineEdit && inlineEdit.id === o.id && inlineEdit.field === "paymentStatusSupplier" ? (
-                            <div className="flex items-center gap-1">
-                              <input type="text" value={inlineEdit.value} autoFocus
-                                onChange={(e) => setInlineEdit({ ...inlineEdit, value: e.target.value })}
-                                onKeyDown={(e) => { if (e.key === "Enter") saveInlineEdit(); if (e.key === "Escape") cancelInlineEdit(); }}
-                                className="w-full px-1.5 py-0.5 text-[11px] border border-blue-400 rounded bg-white focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                              <button onClick={saveInlineEdit} className="text-emerald-600 text-xs font-bold hover:text-emerald-800" title="Сохранить">✓</button>
-                              <button onClick={cancelInlineEdit} className="text-red-400 text-xs font-bold hover:text-red-600" title="Отмена">✕</button>
+                            <div className="absolute z-50 top-0 left-0 bg-white rounded-lg shadow-xl border border-gray-200 py-1 min-w-[120px]">
+                              {["Paid", "Not paid"].map((opt) => (
+                                <button key={opt} onClick={() => {
+                                  // Обновляем статус для всех активных external PO
+                                  const exts = parseExternalPOs(o);
+                                  const updatedPayments = exts.map((e) => e.cancelled ? e.payment : opt).join("\n");
+                                  pushLog({ type: "po_inline_edit", id: o.id, field: "paymentStatusSupplier", prev: o.paymentStatusSupplier || "" });
+                                  setData((prev) => prev.map((x) => x.id === o.id ? { ...x, paymentStatusSupplier: updatedPayments } : x));
+                                  setInlineEdit(null);
+                                }}
+                                  className={`w-full text-left px-3 py-1.5 text-xs font-medium hover:bg-gray-100 transition-colors ${opt === "Paid" ? "text-emerald-700" : "text-amber-700"}`}>
+                                  {opt === "Paid" ? "✅ " : "🟡 "}{opt}
+                                </button>
+                              ))}
+                              <button onClick={cancelInlineEdit} className="w-full text-left px-3 py-1.5 text-xs text-gray-400 hover:bg-gray-100 border-t border-gray-100">Отмена</button>
           </div>
                           ) : (() => {
                             if (!payments.length) return <span className="text-gray-400 cursor-pointer text-[10px]" onClick={() => startInlineEdit(o, "paymentStatusSupplier")}>—</span>;
@@ -2245,6 +2525,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                   <div><div className="text-slate-500 text-[10px] mb-0.5">Плат. компания</div><div className="text-slate-200">{ext.payingCompany || "—"}</div></div>
                   <div><div className="text-slate-500 text-[10px] mb-0.5">Дата размещения</div><div className="text-slate-200">{ext.datePlaced || "—"}</div></div>
                   <div><div className="text-slate-500 text-[10px] mb-0.5">Resp. Procurement</div><div className="text-slate-200">{ext.respProcurement || "—"}</div></div>
+                  <div className="col-span-2"><div className="text-slate-500 text-[10px] mb-0.5">📦 План логистики</div><div className="text-slate-200">{ext.logisticsPlan || "—"}</div></div>
                 </div>
               ))}
               <div className="grid grid-cols-2 gap-3 text-sm mt-2">
@@ -2291,14 +2572,26 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
               <InputField label="Customer Amount ($)" value={editForm.customerAmount} onChange={(v) => setEditForm({ ...editForm, customerAmount: parseFloat(v) || 0 })} type="number" />
               <InputField label="Deadline" value={editForm.customerDeadline} onChange={(v) => setEditForm({ ...editForm, customerDeadline: v })} type="date" />
               <InputField label="Terms" value={editForm.termsDelivery} onChange={(v) => setEditForm({ ...editForm, termsDelivery: v })} />
-              <InputField label="Payment Status" value={editForm.paymentStatusCustomer} onChange={(v) => setEditForm({ ...editForm, paymentStatusCustomer: v })} />
+              <div>
+                <label className="text-xs text-slate-400 mb-1 block">Payment Status</label>
+                <select value={editForm.paymentStatusCustomer} onChange={(e) => setEditForm({ ...editForm, paymentStatusCustomer: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-slate-200 focus:outline-none focus:border-blue-500">
+                  <option value="">— Выберите —</option>
+                  <option value="Paid">Paid</option>
+                  <option value="Not paid">Not paid</option>
+                  <option value="NET 5">NET 5</option>
+                  <option value="NET 7">NET 7</option>
+                  <option value="NET 10">NET 10</option>
+                  <option value="NET 30">NET 30</option>
+                </select>
+              </div>
             </div>
 
             {/* Блок External PO */}
             <div className="border border-slate-600 rounded-lg p-3 space-y-3">
               <div className="flex items-center justify-between">
                 <span className="text-sm font-semibold text-slate-300">External PO (заказы поставщикам)</span>
-                <button onClick={() => setEditForm({ ...editForm, externalOrders: [...(editForm.externalOrders || []), { po: "", supplier: "", supplierAmount: 0, payment: "", payingCompany: "", cancelled: false }] })}
+                <button onClick={() => setEditForm({ ...editForm, externalOrders: [...(editForm.externalOrders || []), { po: "", supplier: "", supplierAmount: 0, payment: "", payingCompany: "", logisticsPlan: "", cancelled: false }] })}
                   className="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white rounded text-xs font-medium transition-colors">+ Добавить PO</button>
               </div>
               {(editForm.externalOrders || []).map((ext, ei) => (
@@ -2341,14 +2634,30 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                       const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], supplierAmount: v };
                       setEditForm({ ...editForm, externalOrders: upd });
                     }} type="number" />
-                    <InputField label="Статус оплаты" value={ext.payment} onChange={(v) => {
-                      const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], payment: v };
-                      setEditForm({ ...editForm, externalOrders: upd });
-                    }} />
-                    <InputField label="Плат. компания" value={ext.payingCompany} onChange={(v) => {
-                      const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], payingCompany: v };
-                      setEditForm({ ...editForm, externalOrders: upd });
-                    }} />
+                    <div>
+                      <label className="text-xs text-slate-400 mb-1 block">Статус оплаты</label>
+                      <select value={ext.payment} onChange={(e) => {
+                        const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], payment: e.target.value };
+                        setEditForm({ ...editForm, externalOrders: upd });
+                      }}
+                        className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-slate-200 focus:outline-none focus:border-blue-500">
+                        <option value="">— Выберите —</option>
+                        <option value="Paid">Paid</option>
+                        <option value="Not paid">Not paid</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs text-slate-400 mb-1 block">Платежная компания</label>
+                      <select value={ext.payingCompany} onChange={(e) => {
+                        const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], payingCompany: e.target.value };
+                        setEditForm({ ...editForm, externalOrders: upd });
+                      }}
+                        className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-slate-200 focus:outline-none focus:border-blue-500">
+                        <option value="">— Выберите —</option>
+                        <option value="Altura Technics">Altura Technics</option>
+                        <option value="YG ENGINEERING">YG ENGINEERING</option>
+                      </select>
+                    </div>
                     <InputField label="Дата размещения" value={ext.datePlaced} onChange={(v) => {
                       const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], datePlaced: v };
                       setEditForm({ ...editForm, externalOrders: upd });
@@ -2357,6 +2666,10 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                       const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], respProcurement: v };
                       setEditForm({ ...editForm, externalOrders: upd });
                     }} placeholder="KV, DS, DO..." />
+                    <InputField label="План логистики" value={ext.logisticsPlan} onChange={(v) => {
+                      const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], logisticsPlan: v };
+                      setEditForm({ ...editForm, externalOrders: upd });
+                    }} placeholder="Описание плана доставки..." />
                   </div>
                 </div>
               ))}
@@ -2442,7 +2755,19 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
             <InputField label="Deadline" value={newPO.customerDeadline} onChange={(v) => setNewPO({ ...newPO, customerDeadline: v })} type="date" />
             <InputField label="Terms of Delivery" value={newPO.termsDelivery} onChange={(v) => setNewPO({ ...newPO, termsDelivery: v })} placeholder="DDP MOW / EXW UAE" />
             <InputField label="Customer Amount ($)" value={newPO.customerAmount} onChange={(v) => setNewPO({ ...newPO, customerAmount: v })} type="number" />
-            <InputField label="Payment Status" value={newPO.paymentStatusCustomer} onChange={(v) => setNewPO({ ...newPO, paymentStatusCustomer: v })} />
+            <div>
+              <label className="text-xs text-slate-400 mb-1 block">Payment Status</label>
+              <select value={newPO.paymentStatusCustomer} onChange={(e) => setNewPO({ ...newPO, paymentStatusCustomer: e.target.value })}
+                className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-slate-200 focus:outline-none focus:border-blue-500">
+                <option value="">— Выберите —</option>
+                <option value="Paid">Paid</option>
+                <option value="Not paid">Not paid</option>
+                <option value="NET 5">NET 5</option>
+                <option value="NET 7">NET 7</option>
+                <option value="NET 10">NET 10</option>
+                <option value="NET 30">NET 30</option>
+              </select>
+            </div>
           </div>
 
           {/* Блок External PO */}
@@ -2492,14 +2817,30 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                     const upd = [...newPO.externalOrders]; upd[ei] = { ...upd[ei], supplierAmount: v };
                     setNewPO({ ...newPO, externalOrders: upd });
                   }} type="number" />
-                  <InputField label="Статус оплаты" value={ext.payment} onChange={(v) => {
-                    const upd = [...newPO.externalOrders]; upd[ei] = { ...upd[ei], payment: v };
-                    setNewPO({ ...newPO, externalOrders: upd });
-                  }} placeholder="paid / not paid" />
-                  <InputField label="Платежная компания" value={ext.payingCompany} onChange={(v) => {
-                    const upd = [...newPO.externalOrders]; upd[ei] = { ...upd[ei], payingCompany: v };
-                    setNewPO({ ...newPO, externalOrders: upd });
-                  }} />
+                  <div>
+                    <label className="text-xs text-slate-400 mb-1 block">Статус оплаты</label>
+                    <select value={ext.payment} onChange={(e) => {
+                      const upd = [...newPO.externalOrders]; upd[ei] = { ...upd[ei], payment: e.target.value };
+                      setNewPO({ ...newPO, externalOrders: upd });
+                    }}
+                      className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-slate-200 focus:outline-none focus:border-blue-500">
+                      <option value="">— Выберите —</option>
+                      <option value="Paid">Paid</option>
+                      <option value="Not paid">Not paid</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-400 mb-1 block">Платежная компания</label>
+                    <select value={ext.payingCompany} onChange={(e) => {
+                      const upd = [...newPO.externalOrders]; upd[ei] = { ...upd[ei], payingCompany: e.target.value };
+                      setNewPO({ ...newPO, externalOrders: upd });
+                    }}
+                      className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-slate-200 focus:outline-none focus:border-blue-500">
+                      <option value="">— Выберите —</option>
+                      <option value="Altura Technics">Altura Technics</option>
+                      <option value="YG ENGINEERING">YG ENGINEERING</option>
+                    </select>
+                  </div>
                   <InputField label="Дата размещения" value={ext.datePlaced} onChange={(v) => {
                     const upd = [...newPO.externalOrders]; upd[ei] = { ...upd[ei], datePlaced: v };
                     setNewPO({ ...newPO, externalOrders: upd });
@@ -2508,6 +2849,10 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                     const upd = [...newPO.externalOrders]; upd[ei] = { ...upd[ei], respProcurement: v };
                     setNewPO({ ...newPO, externalOrders: upd });
                   }} placeholder="KV, DS, DO..." />
+                  <InputField label="План логистики" value={ext.logisticsPlan} onChange={(v) => {
+                    const upd = [...newPO.externalOrders]; upd[ei] = { ...upd[ei], logisticsPlan: v };
+                    setNewPO({ ...newPO, externalOrders: upd });
+                  }} placeholder="Описание плана доставки..." />
                 </div>
               </div>
             ))}
@@ -2542,14 +2887,39 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
 };
 
 // ==================== ДЕБИТОРСКАЯ ЗАДОЛЖЕННОСТЬ ====================
-const Debts = ({ debts, setDebts, pushLog, finResults, setFinResults }) => {
+const Debts = ({ debts, setDebts, pushLog, finResults, setFinResults, openPo }) => {
   const [closeModal, setCloseModal] = useState(null);
   const [closeForm, setCloseForm] = useState({ file: null, date: "", comment: "", amount: "" });
   const [addModal, setAddModal] = useState(false);
   const [form, setForm] = useState({ company: "", order: "", amount: 0, dueDate: "", currency: "USD", upd: "" });
   const [viewDoc, setViewDoc] = useState(null);
 
-  const openD = debts.filter((d) => d.status === "open" && d.amount > 0);
+  // Авто-дебиторка из Фин. результат (УПД есть, оплаты нет)
+  const autoDebts = useMemo(() => getAutoDebts(finResults || [], debts, openPo || []), [finResults, debts, openPo]);
+
+  // Обогащаем ручные записи NET-сроками из Open PO (дата УПД + NET дней)
+  const enrichedManualDebts = useMemo(() => {
+    const poMap = {};
+    (openPo || []).forEach((po) => { poMap[po.internalPo] = po; });
+    // Также ищем УПД-дату из finResults
+    const frMap = {};
+    (finResults || []).forEach((fr) => { frMap[fr.customerPo] = fr; });
+    return debts.map((d) => {
+      const po = poMap[d.order] || {};
+      const fr = frMap[d.order] || {};
+      const payStatus = po.paymentStatusCustomer || "";
+      const netDays = parseNetDays(payStatus);
+      // Дата УПД — берём из finResults или openPo
+      const updDate = fr.updDate || po.updDate || "";
+      // Если у ручной записи нет dueDate, но есть NET и дата УПД — вычислим
+      const computedDue = (!d.dueDate && netDays > 0 && updDate) ? calcDueDate(updDate, netDays) : d.dueDate;
+      return { ...d, dueDate: computedDue || d.dueDate };
+    });
+  }, [debts, openPo, finResults]);
+
+  const allDebts = useMemo(() => [...enrichedManualDebts, ...autoDebts], [enrichedManualDebts, autoDebts]);
+
+  const openD = allDebts.filter((d) => d.status === "open" && d.amount > 0);
   const closedD = debts.filter((d) => d.status === "closed");
 
   const totalDebt = openD.reduce((s, d) => s + d.amount, 0);
@@ -2565,18 +2935,32 @@ const Debts = ({ debts, setDebts, pushLog, finResults, setFinResults }) => {
     reader.onload = (e) => {
       const payDocData = e.target.result;
       const payAmount = parseFloat(closeForm.amount) || 0;
+      const isAuto = String(closeModal.id).startsWith("auto_");
 
+      if (isAuto) {
+        // Авто-запись: обновляем оплату в Фин. результат — запись исчезнет из авто-дебиторки
+        if (setFinResults && closeModal.finResultId) {
+          pushLog({ type: "debt_close_auto", finResultId: closeModal.finResultId, prev: { paymentFact: 0 } });
+          setFinResults((prev) => prev.map((fr) => {
+            if (fr.id === closeModal.finResultId) {
+              return { ...fr, paymentFact: payAmount, paymentDoc: payDocData, paymentDate: closeForm.date };
+            }
+            return fr;
+          }));
+        }
+      } else {
+        // Ручная запись: закрываем в debts и синхронизируем Фин. результат
       pushLog({ type: "debt_close", id: closeModal.id, prev: { status: "open", payDoc: null, payDate: "", payComment: "" } });
-      setDebts((prev) => prev.map((d) => d.id === closeModal.id ? { ...d, status: "closed", payDoc: payDocData, payDate: closeForm.date, payComment: closeForm.comment } : d));
+        setDebts((prev) => prev.map((d) => d.id === closeModal.id ? { ...d, status: "closed", payDoc: payDocData, payDate: closeForm.date, payComment: closeForm.comment } : d));
 
-      // Синхронизация: проставляем оплату в Фин. результат по совпадению PO
-      if (setFinResults && closeModal.order) {
-        setFinResults((prev) => prev.map((fr) => {
-          if (fr.customerPo === closeModal.order) {
-            return { ...fr, paymentFact: payAmount, paymentDoc: payDocData, paymentDate: closeForm.date };
-          }
-          return fr;
-        }));
+        if (setFinResults && closeModal.order) {
+          setFinResults((prev) => prev.map((fr) => {
+            if (fr.customerPo === closeModal.order) {
+              return { ...fr, paymentFact: payAmount, paymentDoc: payDocData, paymentDate: closeForm.date };
+            }
+            return fr;
+          }));
+        }
       }
 
       setCloseModal(null);
@@ -2613,11 +2997,11 @@ const Debts = ({ debts, setDebts, pushLog, finResults, setFinResults }) => {
         </div>
     </div>
 
-      {/* Фильтры */}
+      {/* Заголовок */}
       <div className="flex items-center justify-between flex-wrap gap-3">
           <div>
-          <h2 className="text-lg font-semibold text-[#1E3A5F]">Открытые задолженности</h2>
-          <p className="text-xs text-gray-500">Для закрытия долга обязательно приложить платёжный документ из банка.</p>
+            <h2 className="text-lg font-semibold text-[#1E3A5F]">Открытые задолженности</h2>
+            <p className="text-xs text-gray-500">Для закрытия долга обязательно приложить платёжный документ из банка.</p>
           </div>
         <div className="flex items-center gap-2">
           <button onClick={() => setAddModal(true)} className="px-4 py-2 bg-[#1E3A5F] hover:bg-[#2A4A6F] text-white rounded-lg text-sm font-medium border border-[#2A4A6F] transition-colors">+ Добавить</button>
@@ -2635,51 +3019,56 @@ const Debts = ({ debts, setDebts, pushLog, finResults, setFinResults }) => {
           <div key={company} className="rounded-xl shadow-lg overflow-hidden border border-[#1E3A5F]/30 mb-4">
             {/* Шапка компании */}
             <div className="bg-[#1E3A5F] px-5 py-3 flex justify-between items-center">
-              <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-3">
                 <h3 className="text-white font-semibold text-sm">{company}</h3>
                 <span className="text-blue-200/60 text-xs">{items.length} {items.length === 1 ? "позиция" : "позиций"}</span>
                 {companyOverdue.length > 0 && (
                   <span className="px-2 py-0.5 bg-rose-500/30 text-rose-200 text-[10px] font-bold rounded-full">⚠️ {companyOverdue.length} просроч.</span>
                 )}
-              </div>
+                    </div>
               <span className="text-lg font-bold text-white tabular-nums">${fmt(companyTotal)}</span>
-            </div>
+                  </div>
             {/* Таблица внутри блока */}
             <table className="w-full text-sm table-fixed">
               <colgroup>
-                <col className="w-[15%]" />
                 <col className="w-[20%]" />
-                <col className="w-[15%]" />
-                <col className="w-[10%]" />
-                <col className="w-[20%]" />
-                <col className="w-[20%]" />
+                <col className="w-[18%]" />
+                <col className="w-[18%]" />
+                <col className="w-[26%]" />
+                <col className="w-[18%]" />
               </colgroup>
               <thead>
                 <tr className="bg-[#1E3A5F]/10 text-[#1E3A5F] text-left text-xs uppercase">
                   <th className="py-2 px-4 font-semibold">Заказ</th>
-                  <th className="py-2 px-3 font-semibold">УПД</th>
                   <th className="py-2 px-3 text-right font-semibold">Сумма</th>
-                  <th className="py-2 px-3 font-semibold">Валюта</th>
                   <th className="py-2 px-3 font-semibold">Срок оплаты</th>
+                  <th className="py-2 px-3 font-semibold">Статус срока</th>
                   <th className="py-2 px-3 font-semibold">Действия</th>
                 </tr>
               </thead>
               <tbody className="bg-white">
                 {items.map((d, idx) => {
                   const overdue = d.dueDate && new Date(d.dueDate) < new Date();
+                  const daysLeft = calcDaysRemaining(d.dueDate);
+                  const daysLabel = daysLeft !== null
+                    ? daysLeft < 0
+                      ? <span className="text-rose-700 font-bold">Просрочено {Math.abs(daysLeft)} дн. ⚠️</span>
+                      : daysLeft === 0
+                        ? <span className="text-amber-600 font-bold">Сегодня!</span>
+                        : daysLeft <= 3
+                          ? <span className="text-amber-500 font-semibold">Осталось {daysLeft} дн. ⏳</span>
+                          : <span className="text-gray-600">Осталось {daysLeft} дн.</span>
+                    : <span className="text-gray-400">—</span>;
                   return (
                     <tr key={d.id} className={`border-b border-gray-200 transition-colors hover:bg-blue-50 ${overdue ? "bg-red-200" : idx % 2 === 1 ? "bg-gray-50" : ""}`}>
                       <td className="py-2.5 px-4 text-[#1E3A5F] font-mono text-xs font-medium">{d.order}</td>
-                      <td className="py-2.5 px-3 text-xs">
-                        {d.upd ? <span className="text-violet-600 font-medium">{d.upd}</span> : <span className="text-gray-400">—</span>}
-                      </td>
                       <td className={`py-2.5 px-3 text-right font-mono text-xs font-bold ${overdue ? "text-rose-700" : "text-gray-900"}`}>${fmt(d.amount)}</td>
-                      <td className="py-2.5 px-3 text-gray-600 text-xs">{d.currency}</td>
                       <td className="py-2.5 px-3 text-xs">
                         {d.dueDate ? (
-                          <span className={overdue ? "text-rose-700 font-bold" : "text-gray-600"}>{d.dueDate} {overdue && "⚠️"}</span>
+                          <span className={overdue ? "text-rose-700 font-bold" : "text-gray-600"}>{d.dueDate}</span>
                         ) : <span className="text-gray-400">—</span>}
                       </td>
+                      <td className="py-2.5 px-3 text-xs">{daysLabel}</td>
                       <td className="py-2.5 px-3">
                         <button onClick={() => { setCloseModal(d); setCloseForm({ file: null, date: "", comment: "", amount: String(d.amount || "") }); }} className="px-3 py-1.5 bg-emerald-100 hover:bg-emerald-200 text-emerald-700 rounded-lg text-xs font-medium border border-emerald-300 transition-colors">✅ Закрыть</button>
                       </td>
@@ -3027,7 +3416,8 @@ export default function App() {
   };
 
   const activePO = openPo.filter((r) => r.status === "active").length;
-  const openDebts = debts.filter((d) => d.status === "open" && d.amount > 0).length;
+  const autoDebtsCount = useMemo(() => getAutoDebts(finResults, debts, openPo), [finResults, debts, openPo]);
+  const openDebts = debts.filter((d) => d.status === "open" && d.amount > 0).length + autoDebtsCount.length;
 
   const tabs = [
     { key: "dashboard", label: "Баланс", icon: "💰" },
@@ -3151,10 +3541,10 @@ export default function App() {
         </div>
 
         <div className="p-6">
-          {activeTab === "dashboard" && <Dashboard balances={balances} debts={debts} finResults={finResults} />}
+          {activeTab === "dashboard" && <Dashboard balances={balances} debts={debts} finResults={finResults} openPo={openPo} />}
           {activeTab === "fin" && <FinResults data={finResults} setData={setFinResults} pushLog={pushLog} debts={debts} setDebts={setDebts} />}
           {activeTab === "openpo" && <OpenPO data={openPo} setData={setOpenPo} pushLog={pushLog} finResults={finResults} setFinResults={setFinResults} />}
-          {activeTab === "debts" && <Debts debts={debts} setDebts={setDebts} pushLog={pushLog} finResults={finResults} setFinResults={setFinResults} />}
+          {activeTab === "debts" && <Debts debts={debts} setDebts={setDebts} pushLog={pushLog} finResults={finResults} setFinResults={setFinResults} openPo={openPo} />}
           {activeTab === "infra" && <Infrastructure balances={balances} setBalances={setBalances} pushLog={pushLog} />}
           {activeTab === "import" && <BankImport balances={balances} setBalances={setBalances} />}
         </div>
