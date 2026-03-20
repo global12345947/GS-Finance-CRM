@@ -6,6 +6,16 @@ import { BALANCES_DATA } from "./data/balancesData.js";
 import { INFRA_DATA } from "./data/infraData.js";
 
 // ==================== УТИЛИТЫ ====================
+const downloadBase64File = (base64Data, fileName) => {
+  if (!base64Data) return;
+  const link = document.createElement("a");
+  link.href = base64Data;
+  link.download = fileName || "document";
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+};
+
 const fmt = (n, currency = "") => {
   if (n === null || n === undefined || n === "" || (typeof n === "number" && isNaN(n))) return "—";
   const num = typeof n === "string" ? parseFloat(n) : n;
@@ -448,6 +458,27 @@ const ColumnFilterDropdown = ({ values, selected, onApply, onClear, onClose }) =
   );
 };
 
+const getFinFilterValue = (o, colKey) => {
+  switch (colKey) {
+    case "type": return [o.type === "domestic" ? "ROT" : o.type === "export" ? "EXP" : o.type || "(пусто)"];
+    case "customer": return [o.customer || "(пусто)"];
+    case "customerPo": return [o.customerPo || "(пусто)"];
+    case "orderDate": return [o.orderDate || "(пусто)"];
+    case "customerAmount": return [o.customerAmount ? "$" + fmt(o.customerAmount) : "(пусто)"];
+    case "upd": return [o.noGlobalSmart ? "Без участия GS" : o.hasUpd ? "Есть УПД" : "Нет УПД"];
+    case "paymentFact": return [o.paymentFact > 0 ? "Оплачено" : "Не оплачено"];
+    case "supplierPo": return [o.supplierPo || "(пусто)"];
+    case "supplierAmount": return [o.supplierAmount ? "$" + fmt(o.supplierAmount) : "(пусто)"];
+    case "supplier": return [o.supplier || "(пусто)"];
+    case "finalBuyer": return [o.finalBuyer || "(пусто)"];
+    case "status": {
+      const s = FIN_STAGES.find((st) => st.key === o.status);
+      return [s ? s.label : "(не указан)"];
+    }
+    default: return ["(пусто)"];
+  }
+};
+
 // ==================== АВТО-ДЕБИТОРКА (из Фин. результат) ====================
 // Заказы с УПД, но без оплаты — автоматически попадают в дебиторку
 
@@ -493,12 +524,12 @@ const getAutoDebts = (finResults, existingDebts, openPoData) => {
 
   return finResults
     .filter((r) => {
-      if (!r.hasUpd) return false;
+      // Авто-дебиторка только для УПД, загруженных через CRM (есть файл)
+      if (!r.updFile) return false;
       if (r.status === "cancelled") return false;
       if (r.noGlobalSmart) return false;
       const pf = typeof r.paymentFact === "number" ? r.paymentFact : parseFloat(r.paymentFact) || 0;
       if (pf > 0) return false;
-      // Не дублировать с ручными долгами
       if (existingOrders.has(r.customerPo)) return false;
       return true;
     })
@@ -670,7 +701,7 @@ const Dashboard = ({ balances, debts, finResults, openPo }) => {
 
   // Группируем балансы по инфраструктуре
   const rows = useMemo(() => {
-    const groupOrder = ["РФ", "Lotus", "Crypto", "AJ PARTS", "ALTURA", "AVS TRADING MASHREQ", "AVS TRADING ISLAMIC", "AJ GLOBAL GS"];
+    const groupOrder = ["РФ", "Crypto", "ALTURA", "YOON"];
     const grouped = {};
     balances.forEach((b) => {
       const g = b.group || b.name;
@@ -977,11 +1008,27 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
   const [editModal, setEditModal] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [completeModal, setCompleteModal] = useState(null); // модалка подтверждения "Выполнен"
+  const [columnFilters, setColumnFilters] = useState({});
+  const [openFilter, setOpenFilter] = useState(null);
+  const activeFilterCount = Object.values(columnFilters).filter((s) => s.size > 0).length;
+  const clearAllColumnFilters = () => { setColumnFilters({}); setPage(-1); };
   const PP = 30;
+
+  const FIN_FILTER_COL_KEYS = ["type", "customer", "customerPo", "orderDate", "customerAmount",
+    "upd", "paymentFact", "supplierPo", "supplierAmount", "supplier", "finalBuyer", "status"];
+
+  const finUniqueValuesMap = useMemo(() => {
+    const map = {};
+    FIN_FILTER_COL_KEYS.forEach((col) => {
+      const vals = new Set();
+      data.forEach((o) => getFinFilterValue(o, col).forEach((v) => vals.add(v)));
+      map[col] = [...vals].sort();
+    });
+    return map;
+  }, [data]);
 
   const filtered = useMemo(() => {
     let items = [...data];
-    // Сортировка по дате: от старого к новому (самые новые на последней странице)
     items.sort((a, b) => (a.orderDate || "").localeCompare(b.orderDate || ""));
     if (filter === "active") items = items.filter((o) => o.status === "active");
     if (filter === "completed") items = items.filter((o) => o.status === "completed");
@@ -1000,8 +1047,15 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
           o.supplierPo?.toLowerCase().includes(q)
       );
     }
+    Object.entries(columnFilters).forEach(([colKey, selectedSet]) => {
+      if (!selectedSet || selectedSet.size === 0) return;
+      items = items.filter((o) => {
+        const vals = getFinFilterValue(o, colKey);
+        return vals.some((v) => selectedSet.has(v));
+      });
+    });
     return items;
-  }, [data, filter, typeFilter, search]);
+  }, [data, filter, typeFilter, search, columnFilters]);
 
   const pages = Math.ceil(filtered.length / PP);
   // Авто-переход на последнюю страницу при первом рендере (-1 = auto)
@@ -1226,6 +1280,13 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
           onChange={(e) => { setSearch(e.target.value); setPage(-1); }}
           className="flex-1 min-w-48 px-4 py-2 bg-white border border-gray-300 rounded-lg text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:border-[#1E3A5F] focus:ring-1 focus:ring-[#1E3A5F]/30"
         />
+        {activeFilterCount > 0 && (
+          <button onClick={clearAllColumnFilters}
+            className="px-3 py-2 bg-amber-100 text-amber-800 rounded-lg text-xs font-medium hover:bg-amber-200 transition-colors flex items-center gap-1.5">
+            <span>Фильтры ({activeFilterCount})</span>
+            <span className="text-amber-600">✕</span>
+          </button>
+        )}
         <span className="text-xs text-gray-500 font-medium">{filtered.length} записей</span>
       </div>
 
@@ -1235,18 +1296,45 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
       <table className="w-full text-sm">
             <thead>
               <tr className="bg-[#1E3A5F] text-white text-left text-xs uppercase">
-                <th className="py-3 px-2 font-semibold">Тип</th>
-                <th className="py-3 px-2 font-semibold">Клиент</th>
-                <th className="py-3 px-2 font-semibold">Internal PO</th>
-                <th className="py-3 px-2 font-semibold">Дата</th>
-                <th className="py-3 px-2 text-right font-semibold">Сумма USD</th>
-                <th className="py-3 px-2 font-semibold">УПД</th>
-                <th className="py-3 px-2 text-right font-semibold">Оплата факт ₽</th>
-                <th className="py-3 px-2 font-semibold">External PO</th>
-                <th className="py-3 px-2 text-right font-semibold">Сумма пост. $</th>
-                <th className="py-3 px-2 font-semibold">Поставщик</th>
-                <th className="py-3 px-2 font-semibold">Структура</th>
-                <th className="py-3 px-2 font-semibold">Статус</th>
+                {[
+                  { key: "type", label: "Тип", align: "text-left" },
+                  { key: "customer", label: "Клиент", align: "text-left" },
+                  { key: "customerPo", label: "Internal PO", align: "text-left" },
+                  { key: "orderDate", label: "Дата", align: "text-left" },
+                  { key: "customerAmount", label: "Сумма USD", align: "text-right" },
+                  { key: "upd", label: "УПД", align: "text-left" },
+                  { key: "paymentFact", label: "Оплата факт ₽", align: "text-right" },
+                  { key: "supplierPo", label: "External PO", align: "text-left" },
+                  { key: "supplierAmount", label: "Сумма пост. $", align: "text-right" },
+                  { key: "supplier", label: "Поставщик", align: "text-left" },
+                  { key: "finalBuyer", label: "Структура", align: "text-left" },
+                  { key: "status", label: "Статус", align: "text-left" },
+                ].map((col) => {
+                  const isActive = columnFilters[col.key]?.size > 0;
+                  const isOpen = openFilter === col.key;
+                  return (
+                    <th key={col.key} className={`py-3 px-2 font-semibold relative ${col.align}`}>
+                      <div className={`flex items-center gap-1 ${col.align === "text-right" ? "justify-end" : ""}`}>
+                        <span>{col.label}</span>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setOpenFilter(isOpen ? null : col.key); }}
+                          className={`shrink-0 w-4 h-4 flex items-center justify-center rounded text-[8px] transition-all ${
+                            isActive ? "bg-yellow-400 text-[#1E3A5F]" : "text-white/40 hover:text-white hover:bg-white/20"
+                          }`}
+                          title="Фильтр колонки">▼</button>
+                      </div>
+                      {isOpen && (
+                        <ColumnFilterDropdown
+                          values={finUniqueValuesMap[col.key] || []}
+                          selected={columnFilters[col.key]}
+                          onApply={(sel) => { setColumnFilters((prev) => ({ ...prev, [col.key]: sel })); setPage(-1); }}
+                          onClear={() => { setColumnFilters((prev) => { const next = { ...prev }; delete next[col.key]; return next; }); setPage(-1); }}
+                          onClose={() => setOpenFilter(null)}
+                        />
+                      )}
+                    </th>
+                  );
+                })}
                 <th className="py-3 px-2 font-semibold">Действия</th>
               </tr>
             </thead>
@@ -1270,9 +1358,14 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
                         🔹 Без участия GS
                       </div>
                     ) : r.hasUpd ? (
-                      <div title={r.orderStatus} className="text-emerald-600 cursor-help text-xs leading-tight">
-                        <div>✅ УПД №{r.updNum || "—"}</div>
-                        <div className="text-emerald-500 text-[10px] mt-0.5">от {r.updDate || "—"}</div>
+                      <div title={r.orderStatus} className="text-emerald-600 text-xs leading-tight">
+                        <div className="cursor-help">✅ УПД №{r.updNum || "—"}</div>
+                        <div className="text-emerald-500 text-[10px] mt-0.5">от {r.updDate || "—"}
+                          {r.updFile && (
+                            <button onClick={(e) => { e.stopPropagation(); downloadBase64File(r.updFile, `УПД_${r.updNum || r.customerPo}.pdf`); }}
+                              className="ml-1 text-blue-500 hover:text-blue-700 font-medium" title="Скачать УПД">⬇</button>
+                          )}
+                        </div>
                       </div>
                     ) : (
                       <span className="text-gray-400 text-xs">—</span>
@@ -1280,9 +1373,15 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
                   </td>
                   <td className="py-2.5 px-2 text-right">
                     {r.paymentFact > 0 ? (
-                      <span className="text-emerald-700 font-mono text-xs font-semibold" title={`₽${r.paymentFact.toLocaleString("ru-RU")}`}>
-                        ₽{fmt(r.paymentFact)}
-                      </span>
+                      <div className="flex items-center justify-end gap-1">
+                        <span className="text-emerald-700 font-mono text-xs font-semibold" title={`₽${r.paymentFact.toLocaleString("ru-RU")}`}>
+                          ₽{fmt(r.paymentFact)}
+                        </span>
+                        {r.paymentDoc && (
+                          <button onClick={(e) => { e.stopPropagation(); downloadBase64File(r.paymentDoc, `Платёжка_${r.customerPo}.pdf`); }}
+                            className="text-blue-500 hover:text-blue-700 text-[10px] font-medium" title="Скачать платёжку">⬇</button>
+                        )}
+                      </div>
                     ) : (
                       <button
                         onClick={(e) => { e.stopPropagation(); setPayModal(r); }}
@@ -1470,8 +1569,12 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
                 🔹 Заказ без участия Global Smart
               </div>
             ) : detailModal.hasUpd ? (
-              <div className="bg-emerald-500/10 border border-emerald-500/20 p-3 rounded-lg text-emerald-300 text-sm">
-                ✅ УПД №{detailModal.updNum} от {detailModal.updDate}
+              <div className="bg-emerald-500/10 border border-emerald-500/20 p-3 rounded-lg text-emerald-300 text-sm flex items-center justify-between">
+                <span>✅ УПД №{detailModal.updNum} от {detailModal.updDate}</span>
+                {detailModal.updFile && (
+                  <button onClick={() => downloadBase64File(detailModal.updFile, `УПД_${detailModal.updNum || detailModal.customerPo}.pdf`)}
+                    className="px-3 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 rounded-lg text-xs font-medium transition-colors">⬇ Скачать</button>
+                )}
               </div>
             ) : null}
               </div>
@@ -2383,9 +2486,15 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                           🔹 Без участия GS
               </span>
                       ) : o.hasUpd ? (
-                        <span className="text-emerald-600 text-xs cursor-help" title={`УПД №${o.updNum} от ${o.updDate}`}>
-                          ✅ <span className="text-emerald-700 font-medium">УПД №{o.updNum || "—"} от {o.updDate || "—"}</span>
-                        </span>
+                        <div className="text-emerald-600 text-xs leading-tight">
+                          <span className="cursor-help" title={`УПД №${o.updNum} от ${o.updDate}`}>
+                            ✅ <span className="text-emerald-700 font-medium">УПД №{o.updNum || "—"} от {o.updDate || "—"}</span>
+                          </span>
+                          {o.updFile && (
+                            <button onClick={(e) => { e.stopPropagation(); downloadBase64File(o.updFile, `УПД_${o.updNum || o.internalPo}.pdf`); }}
+                              className="ml-1 text-blue-500 hover:text-blue-700 text-[10px] font-medium" title="Скачать УПД">⬇</button>
+                          )}
+                        </div>
                       ) : <span className="text-gray-300">—</span>}
                     </td>
                     <td className="py-2 px-2 text-center" onClick={(e) => e.stopPropagation()}>
@@ -2547,8 +2656,12 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
               </div>
             )}
             {detailModal.hasUpd && !detailModal.noGlobalSmart && (
-              <div className="bg-emerald-500/10 border border-emerald-500/20 p-3 rounded-lg text-sm text-emerald-300">
-                ✅ УПД №{detailModal.updNum} от {detailModal.updDate}
+              <div className="bg-emerald-500/10 border border-emerald-500/20 p-3 rounded-lg text-sm text-emerald-300 flex items-center justify-between">
+                <span>✅ УПД №{detailModal.updNum} от {detailModal.updDate}</span>
+                {detailModal.updFile && (
+                  <button onClick={() => downloadBase64File(detailModal.updFile, `УПД_${detailModal.updNum || detailModal.internalPo}.pdf`)}
+                    className="px-3 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 rounded-lg text-xs font-medium transition-colors">⬇ Скачать</button>
+                )}
               </div>
             )}
             {detailModal.mgmtComments && (
@@ -3105,7 +3218,11 @@ const Debts = ({ debts, setDebts, pushLog, finResults, setFinResults, openPo }) 
                     <td className="py-2 px-3 text-gray-500 text-xs">{d.payDate || "—"}</td>
                     <td className="py-2 px-3">
                       {d.payDoc ? (
-                        <button onClick={() => setViewDoc(d)} className="text-xs text-blue-600 hover:text-blue-800 font-medium">📎 Документ</button>
+                        <div className="flex items-center gap-1">
+                          <button onClick={() => setViewDoc(d)} className="text-xs text-blue-600 hover:text-blue-800 font-medium">📎 Просмотр</button>
+                          <button onClick={() => downloadBase64File(d.payDoc, `Платёжка_${d.order}.pdf`)}
+                            className="text-xs text-emerald-600 hover:text-emerald-800 font-medium" title="Скачать документ">⬇</button>
+                        </div>
                       ) : <span className="text-gray-400 text-xs">—</span>}
                     </td>
                   </tr>
@@ -3164,7 +3281,11 @@ const Debts = ({ debts, setDebts, pushLog, finResults, setFinResults, openPo }) 
       <Modal isOpen={!!viewDoc} onClose={() => setViewDoc(null)} title="Платёжный документ" wide>
         {viewDoc && viewDoc.payDoc && (
           <div>
-            <p className="text-slate-400 text-sm mb-3">{viewDoc.company} — {viewDoc.order} — Закрыт: {viewDoc.payDate}</p>
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-slate-400 text-sm">{viewDoc.company} — {viewDoc.order} — Закрыт: {viewDoc.payDate}</p>
+              <button onClick={() => downloadBase64File(viewDoc.payDoc, `Платёжка_${viewDoc.order}.pdf`)}
+                className="px-4 py-1.5 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-xs font-medium transition-colors">⬇ Скачать документ</button>
+            </div>
             {viewDoc.payDoc.startsWith("data:image") ? <img src={viewDoc.payDoc} alt="Платёжка" className="max-w-full rounded-lg" /> : <a href={viewDoc.payDoc} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300">Открыть PDF</a>}
             {viewDoc.payComment && <p className="mt-3 text-slate-400 text-sm">Комментарий: {viewDoc.payComment}</p>}
           </div>
@@ -3178,118 +3299,388 @@ const Debts = ({ debts, setDebts, pushLog, finResults, setFinResults, openPo }) 
 const Infrastructure = ({ balances, setBalances, pushLog }) => {
   const [selectedAcc, setSelectedAcc] = useState(null);
   const [showPayment, setShowPayment] = useState(false);
-  const [payment, setPayment] = useState({ acc: "", type: "income", amount: 0, desc: "", date: new Date().toISOString().split("T")[0] });
+  const [payment, setPayment] = useState({ from: "", to: "", amount: 0, desc: "", date: new Date().toISOString().split("T")[0] });
+  const [editingComment, setEditingComment] = useState(null);
+  const [editCommentVal, setEditCommentVal] = useState("");
+  const [pendingTransfers, setPendingTransfers] = useState([]);
+  const [confirmTransfer, setConfirmTransfer] = useState(null);
+  const [confirmFile, setConfirmFile] = useState(null);
+
+  const startEditComment = (op) => { setEditingComment(op.id); setEditCommentVal(op.comment || ""); };
+  const saveComment = (opId) => {
+    const ops = INFRA_DATA[selectedAcc];
+    if (ops) { const op = ops.find((o) => o.id === opId); if (op) op.comment = editCommentVal; }
+    setEditingComment(null);
+  };
 
   const processPayment = () => {
     const amt = parseFloat(payment.amount) || 0;
-    if (!payment.acc || !amt) return;
-    pushLog({ type: "infra_payment", accName: payment.acc, prev: balances.find((b) => b.name === payment.acc)?.balance || 0 });
-    setBalances((prev) => prev.map((b) => b.name === payment.acc ? { ...b, balance: payment.type === "income" ? b.balance + amt : b.balance - amt } : b));
+    if (!payment.from || !amt) return;
+    const fromAcc = balances.find((b) => b.name === payment.from);
+    pushLog({ type: "infra_payment", accName: payment.from, prev: fromAcc?.balance || 0 });
+    setBalances((prev) => prev.map((b) => b.name === payment.from ? { ...b, balance: b.balance - amt } : b));
+    if (payment.to) {
+      setPendingTransfers((prev) => [...prev, {
+        id: Date.now(), from: payment.from, to: payment.to, amount: amt, currency: fromAcc?.currency || "USD",
+        desc: payment.desc, date: payment.date, createdAt: new Date().toISOString(),
+      }]);
+    }
     setShowPayment(false);
-    setPayment({ acc: "", type: "income", amount: 0, desc: "", date: new Date().toISOString().split("T")[0] });
+    setPayment({ from: "", to: "", amount: 0, desc: "", date: new Date().toISOString().split("T")[0] });
   };
+
+  const handleConfirmTransfer = () => {
+    if (!confirmTransfer || !confirmFile) return;
+    const t = confirmTransfer;
+    pushLog({ type: "infra_payment", accName: t.to, prev: balances.find((b) => b.name === t.to)?.balance || 0 });
+    setBalances((prev) => prev.map((b) => b.name === t.to ? { ...b, balance: b.balance + t.amount } : b));
+    setPendingTransfers((prev) => prev.map((p) => p.id === t.id
+      ? { ...p, status: "completed", completedAt: new Date().toISOString(), fileName: confirmFile.name, fileData: confirmFile.data }
+      : p
+    ));
+    setConfirmTransfer(null);
+    setConfirmFile(null);
+  };
+
+  const cancelPending = (t) => {
+    pushLog({ type: "infra_payment", accName: t.from, prev: balances.find((b) => b.name === t.from)?.balance || 0 });
+    setBalances((prev) => prev.map((b) => b.name === t.from ? { ...b, balance: b.balance + t.amount } : b));
+    setPendingTransfers((prev) => prev.map((p) => p.id === t.id ? { ...p, status: "cancelled" } : p));
+  };
+
+  const pendingCount = pendingTransfers.filter((t) => !t.status).length;
+  const completedCount = pendingTransfers.filter((t) => t.status === "completed").length;
 
   const safes = balances.filter((b) => b.name.includes("Сейф") || b.name.includes("Crypto"));
   const accounts = balances.filter((b) => !b.name.includes("Сейф") && !b.name.includes("Crypto"));
-  const accOps = selectedAcc ? (INFRA_DATA[selectedAcc] || []) : [];
+  const accOps = selectedAcc ? [...(INFRA_DATA[selectedAcc] || [])].reverse() : [];
+
+  const totalUSD = balances.filter((b) => b.currency === "USD").reduce((s, b) => s + b.balance, 0);
+  const totalAccounts = accounts.length;
 
   return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <div><h2 className="text-lg font-semibold text-white">Инфраструктуры и остатки</h2><p className="text-xs text-slate-500">Балансы и операции по каждому счёту</p></div>
-        <button onClick={() => setShowPayment(true)} className="px-4 py-2 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 rounded-lg text-sm font-medium border border-emerald-500/30 transition-colors">💳 Провести платёж</button>
-    </div>
+    <div className="space-y-4">
+      {/* Сводные карточки */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="bg-[#1E3A5F] rounded-xl p-4 border border-[#2A4A6F]">
+          <div className="flex items-start justify-between mb-2">
+            <span className="text-blue-200/70 text-xs font-medium uppercase tracking-wider">Общий баланс USD</span>
+            <span className="text-xl">💰</span>
+          </div>
+          <div className={`text-2xl font-bold tracking-tight ${totalUSD < 0 ? "text-rose-400" : "text-white"}`}>${fmt(totalUSD)}</div>
+          <div className="text-xs text-blue-300/60 mt-1">По всем USD-счетам</div>
+        </div>
+        <div className="bg-[#1E3A5F] rounded-xl p-4 border border-[#2A4A6F]">
+          <div className="flex items-start justify-between mb-2">
+            <span className="text-blue-200/70 text-xs font-medium uppercase tracking-wider">Счета</span>
+            <span className="text-xl">🏦</span>
+          </div>
+          <div className="text-2xl font-bold text-white tracking-tight">{totalAccounts}</div>
+          <div className="text-xs text-blue-300/60 mt-1">Банковские счета</div>
+        </div>
+        <div className="bg-[#1E3A5F] rounded-xl p-4 border border-[#2A4A6F]">
+          <div className="flex items-start justify-between mb-2">
+            <span className="text-blue-200/70 text-xs font-medium uppercase tracking-wider">Сейф / Crypto</span>
+            <span className="text-xl">🔐</span>
+          </div>
+          <div className="text-2xl font-bold text-white tracking-tight">{safes.length}</div>
+          <div className="text-xs text-blue-300/60 mt-1">Наличные и крипто</div>
+        </div>
+      </div>
 
-      {safes.length > 0 && (
+      {/* Заголовок */}
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h3 className="text-slate-400 font-medium text-sm mb-2">Сейф / Crypto</h3>
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+          <h2 className="text-lg font-semibold text-[#1E3A5F]">Инфраструктуры и остатки</h2>
+          <p className="text-xs text-gray-500">Балансы и операции по каждому счёту. Нажмите на карточку для просмотра операций.</p>
+        </div>
+        <button onClick={() => setShowPayment(true)} className="px-4 py-2 bg-[#1E3A5F] hover:bg-[#2A4A6F] text-white rounded-lg text-sm font-medium border border-[#2A4A6F] transition-colors">💳 Провести платёж</button>
+      </div>
+
+      {/* Сейф / Crypto */}
+      {safes.length > 0 && (
+        <div className="rounded-xl shadow-lg overflow-hidden border border-[#1E3A5F]/30">
+          <div className="bg-[#1E3A5F] px-5 py-3">
+            <h3 className="text-white font-semibold text-sm">Сейф / Crypto</h3>
+          </div>
+          <div className="bg-white p-4 grid grid-cols-2 md:grid-cols-3 gap-3">
             {safes.map((b) => (
-              <Card key={b.id} className={`p-4 hover:border-blue-500/30 transition-all ${selectedAcc === b.name ? "border-blue-500/50 bg-blue-500/5" : ""}`} onClick={() => setSelectedAcc(b.name)}>
-                <h4 className="text-white font-semibold text-sm mb-2">{b.name}</h4>
-                <div className={`text-xl font-bold ${b.balance < 0 ? "text-red-400" : "text-emerald-400"}`}>{fmt(b.balance)} {b.currency}</div>
-              </Card>
+              <div key={b.id} onClick={() => setSelectedAcc(selectedAcc === b.name ? null : b.name)}
+                className={`rounded-xl border-2 p-4 cursor-pointer transition-all hover:shadow-md ${
+                  selectedAcc === b.name ? "border-[#1E3A5F] bg-blue-50 shadow-md" : "border-gray-200 hover:border-[#1E3A5F]/50"
+                }`}>
+                <h4 className="text-[#1E3A5F] font-semibold text-sm mb-2">{b.name}</h4>
+                <div className={`text-xl font-bold tabular-nums ${b.balance < 0 ? "text-rose-600" : "text-emerald-600"}`}>
+                  {fmt(b.balance, b.currency)}
+                </div>
+              </div>
             ))}
-    </div>
+          </div>
         </div>
       )}
 
-      <div>
-        <h3 className="text-slate-400 font-medium text-sm mb-2">Банковские счета</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      {/* Банковские счета */}
+      <div className="rounded-xl shadow-lg overflow-hidden border border-[#1E3A5F]/30">
+        <div className="bg-[#1E3A5F] px-5 py-3">
+          <h3 className="text-white font-semibold text-sm">Банковские счета</h3>
+        </div>
+        <div className="bg-white p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
           {accounts.map((b) => (
-            <Card key={b.id} className={`p-4 hover:border-blue-500/30 transition-all ${selectedAcc === b.name ? "border-blue-500/50 bg-blue-500/5" : ""}`} onClick={() => setSelectedAcc(b.name)}>
-              <h4 className="text-white font-semibold text-sm mb-2">{b.name}</h4>
-              <div className={`text-xl font-bold ${b.balance < 0 ? "text-red-400" : "text-emerald-400"}`}>{fmt(b.balance)} {b.currency}</div>
-            </Card>
+            <div key={b.id} onClick={() => setSelectedAcc(selectedAcc === b.name ? null : b.name)}
+              className={`rounded-xl border-2 p-4 cursor-pointer transition-all hover:shadow-md ${
+                selectedAcc === b.name ? "border-[#1E3A5F] bg-blue-50 shadow-md" : "border-gray-200 hover:border-[#1E3A5F]/50"
+              }`}>
+              <h4 className="text-[#1E3A5F] font-semibold text-sm mb-1">{b.name}</h4>
+              <div className="text-xs text-gray-400 mb-2">{b.group} · {b.currency}</div>
+              <div className={`text-xl font-bold tabular-nums ${b.balance < 0 ? "text-rose-600" : "text-emerald-600"}`}>
+                {fmt(b.balance, b.currency)}
+              </div>
+            </div>
           ))}
         </div>
       </div>
 
+      {/* Журнал переводов */}
+      {pendingTransfers.length > 0 && (
+        <div className="rounded-xl shadow-lg overflow-hidden border border-[#1E3A5F]/30">
+          <div className="bg-[#1E3A5F] px-5 py-3 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <h3 className="text-white font-semibold text-sm">Журнал переводов</h3>
+              {pendingCount > 0 && <span className="bg-amber-500 text-white text-xs font-bold px-2 py-0.5 rounded-full">{pendingCount} в пути</span>}
+              {completedCount > 0 && <span className="bg-emerald-500 text-white text-xs font-bold px-2 py-0.5 rounded-full">{completedCount} исполнено</span>}
+            </div>
+          </div>
+          <div className="bg-white p-4 space-y-3">
+            {[...pendingTransfers].reverse().map((t) => {
+              const isDone = t.status === "completed";
+              const isCancelled = t.status === "cancelled";
+              return (
+                <div key={t.id} className={`rounded-xl border p-4 flex items-center justify-between gap-4 flex-wrap transition-colors ${
+                  isDone ? "bg-emerald-50 border-emerald-300" : isCancelled ? "bg-gray-50 border-gray-200 opacity-60" : "bg-amber-50 border-amber-300"
+                }`}>
+                  <div className="flex items-center gap-3 flex-1 min-w-[280px]">
+                    <div className="text-right">
+                      <div className="text-xs text-gray-400 mb-0.5">Откуда</div>
+                      <div className={`text-sm font-semibold ${isCancelled ? "text-gray-400 line-through" : "text-rose-600"}`}>{t.from}</div>
+                    </div>
+                    <div className={`text-xl ${isDone ? "text-emerald-500" : isCancelled ? "text-gray-300" : "text-amber-500"}`}>→</div>
+                    <div>
+                      <div className="text-xs text-gray-400 mb-0.5">Куда</div>
+                      <div className={`text-sm font-semibold ${isCancelled ? "text-gray-400 line-through" : "text-emerald-600"}`}>{t.to}</div>
+                    </div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-xs text-gray-400 mb-0.5">Сумма</div>
+                    <div className={`text-lg font-bold tabular-nums ${isCancelled ? "text-gray-400 line-through" : "text-[#1E3A5F]"}`}>{fmt(t.amount, t.currency)}</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-xs text-gray-400 mb-0.5">Дата отправки</div>
+                    <div className="text-sm text-gray-700">{t.date}</div>
+                  </div>
+                  <div className="text-center min-w-[100px]">
+                    {isDone && (
+                      <>
+                        <div className="text-xs font-semibold text-emerald-600 mb-0.5">✓ Исполнен</div>
+                        <div className="text-[10px] text-gray-400">{new Date(t.completedAt).toLocaleDateString("ru-RU")}</div>
+                        {t.fileName && (
+                          <button onClick={() => downloadBase64File(t.fileData, t.fileName)}
+                            className="text-[10px] text-blue-500 hover:text-blue-700 font-medium truncate max-w-[120px]" title={`Скачать: ${t.fileName}`}>
+                            📎 {t.fileName} ⬇
+                          </button>
+                        )}
+                      </>
+                    )}
+                    {isCancelled && <div className="text-xs font-semibold text-gray-400">✕ Отменён</div>}
+                    {!t.status && <div className="text-xs font-semibold text-amber-600">⏳ В пути</div>}
+                  </div>
+                  {t.desc && <div className="text-xs text-gray-500 basis-full">{t.desc}</div>}
+                  {!t.status && (
+                    <div className="flex gap-2 basis-full justify-end">
+                      <button onClick={() => { setConfirmTransfer(t); setConfirmFile(null); }}
+                        className="px-4 py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg text-xs font-medium transition-colors">
+                        Подтвердить получение
+                      </button>
+                      <button onClick={() => cancelPending(t)}
+                        className="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg text-xs font-medium transition-colors">
+                        Отменить
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Модалка подтверждения перевода */}
+      <Modal isOpen={!!confirmTransfer} onClose={() => { setConfirmTransfer(null); setConfirmFile(null); }} title="Подтверждение получения перевода">
+        {confirmTransfer && (
+          <div className="space-y-4">
+            <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 text-blue-300 text-sm">
+              Для зачисления средств на счёт получателя необходимо приложить банковскую выписку (PDF, JPG, PNG)
+            </div>
+            <div className="bg-slate-700/50 rounded-lg p-4 space-y-2">
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-400">Откуда:</span>
+                <span className="text-rose-400 font-medium">{confirmTransfer.from}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-400">Куда:</span>
+                <span className="text-emerald-400 font-medium">{confirmTransfer.to}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-400">Сумма:</span>
+                <span className="text-white font-bold">{fmt(confirmTransfer.amount, confirmTransfer.currency)}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-400">Дата отправки:</span>
+                <span className="text-white">{confirmTransfer.date}</span>
+              </div>
+              {confirmTransfer.desc && (
+                <div className="flex justify-between text-sm">
+                  <span className="text-slate-400">Описание:</span>
+                  <span className="text-white">{confirmTransfer.desc}</span>
+                </div>
+              )}
+            </div>
+            <div>
+              <label className="text-xs text-slate-400 mb-2 block">Банковская выписка (обязательно)</label>
+              <label className={`flex items-center justify-center gap-2 py-4 border-2 border-dashed rounded-xl cursor-pointer transition-colors ${
+                confirmFile ? "border-emerald-500/50 bg-emerald-500/10" : "border-slate-600 hover:border-blue-500/50 hover:bg-blue-500/5"
+              }`}>
+                <input type="file" accept=".pdf,.jpg,.jpeg,.png" className="hidden" onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) { const reader = new FileReader(); reader.onload = (ev) => setConfirmFile({ name: f.name, data: ev.target.result }); reader.readAsDataURL(f); }
+                }} />
+                {confirmFile
+                  ? <span className="text-emerald-400 text-sm font-medium">✓ {confirmFile.name}</span>
+                  : <span className="text-slate-400 text-sm">📎 Нажмите для загрузки файла</span>}
+              </label>
+            </div>
+            <div className="flex justify-end gap-3 pt-2">
+              <button onClick={() => { setConfirmTransfer(null); setConfirmFile(null); }} className="px-4 py-2 text-slate-400 hover:text-white text-sm">Отмена</button>
+              <button onClick={handleConfirmTransfer} disabled={!confirmFile}
+                className={`px-6 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  confirmFile ? "bg-emerald-500 hover:bg-emerald-600 text-white" : "bg-slate-700 text-slate-500 cursor-not-allowed"
+                }`}>
+                Подтвердить зачисление
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Таблица операций выбранного счёта */}
       {selectedAcc && (
-        <Card className="p-5">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-white font-semibold">Операции: {selectedAcc}</h3>
-            <button onClick={() => setSelectedAcc(null)} className="text-slate-400 hover:text-white text-xl">&times;</button>
+        <div className="rounded-xl shadow-lg overflow-hidden border border-[#1E3A5F]/30">
+          <div className="bg-[#1E3A5F] px-5 py-3 flex items-center justify-between">
+            <h3 className="text-white font-semibold text-sm">Операции: {selectedAcc}</h3>
+            <button onClick={() => setSelectedAcc(null)} className="text-white/60 hover:text-white text-lg transition-colors">&times;</button>
           </div>
           {accOps.length > 0 ? (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
-                <thead><tr className="text-slate-400 text-xs uppercase border-b border-slate-700">
-                  <th className="py-2 px-2 text-left">PO</th>
-                  <th className="py-2 px-2 text-right">Приход</th>
-                  <th className="py-2 px-2 text-right">Расход</th>
-                  <th className="py-2 px-2 text-right">Комиссии</th>
-                  <th className="py-2 px-2 text-left">Поставщик</th>
-                  <th className="py-2 px-2 text-left">Инвойс</th>
-                  <th className="py-2 px-2 text-left">Дата</th>
-                  <th className="py-2 px-2 text-right">Остаток</th>
-                </tr></thead>
-                <tbody>{accOps.map((op) => (
-                  <tr key={op.id} className="border-b border-slate-700/30 hover:bg-slate-700/20">
-                    <td className="py-2 px-2 text-slate-300 font-mono text-xs">{op.poRef || (op.description ? <span className="text-blue-300 italic">{op.description}</span> : "—")}</td>
-                    <td className="py-2 px-2 text-right text-emerald-400">{op.received ? "+" + fmt(op.received) : ""}</td>
-                    <td className="py-2 px-2 text-right text-red-400">{op.outgoing ? "-" + fmt(op.outgoing) : ""}</td>
-                    <td className="py-2 px-2 text-right text-amber-400 text-xs">{op.bankFees ? fmt(op.bankFees) : ""}</td>
-                    <td className="py-2 px-2 text-slate-300 text-xs max-w-[150px] whitespace-pre-line">{op.supplier || "—"}</td>
-                    <td className="py-2 px-2 text-slate-400 font-mono text-xs">{op.invoice || "—"}</td>
-                    <td className="py-2 px-2 text-slate-400 text-xs whitespace-nowrap">{op.date || "—"}</td>
-                    <td className="py-2 px-2 text-right font-medium"><span className={op.balance < 0 ? "text-red-400" : "text-white"}>{op.balance !== 0 ? fmt(op.balance) : "—"}</span></td>
+                <thead>
+                  <tr className="bg-[#1E3A5F]/10 text-[#1E3A5F] text-left text-xs uppercase">
+                    <th className="py-2.5 px-3 font-semibold">PO / Описание</th>
+                    <th className="py-2.5 px-3 text-right font-semibold">Приход</th>
+                    <th className="py-2.5 px-3 text-right font-semibold">Расход</th>
+                    <th className="py-2.5 px-3 text-right font-semibold">Комиссии</th>
+                    <th className="py-2.5 px-3 font-semibold">Поставщик</th>
+                    <th className="py-2.5 px-3 font-semibold">Инвойс</th>
+                    <th className="py-2.5 px-3 font-semibold">Дата</th>
+                    <th className="py-2.5 px-3 text-right font-semibold">Остаток</th>
+                    <th className="py-2.5 px-3 font-semibold">Комментарий</th>
                   </tr>
-                ))}</tbody>
+                </thead>
+                <tbody className="bg-white">
+                  {accOps.map((op, idx) => (
+                    <tr key={op.id} className={`border-b border-gray-200 hover:bg-blue-50 transition-colors ${idx % 2 === 1 ? "bg-gray-50" : ""}`}>
+                      <td className="py-2 px-3 text-gray-800 font-mono text-xs max-w-[180px]">
+                        {op.poRef
+                          ? <span className="whitespace-pre-line">{op.poRef}</span>
+                          : op.description
+                            ? <span className="text-blue-600 italic text-xs">{op.description}</span>
+                            : <span className="text-gray-400">—</span>}
+                      </td>
+                      <td className="py-2 px-3 text-right text-emerald-600 font-semibold tabular-nums text-xs">{op.received ? "+" + fmt(op.received) : ""}</td>
+                      <td className="py-2 px-3 text-right text-rose-600 font-semibold tabular-nums text-xs">{op.outgoing ? "-" + fmt(op.outgoing) : ""}</td>
+                      <td className="py-2 px-3 text-right text-amber-600 text-xs tabular-nums">{op.bankFees ? fmt(op.bankFees) : ""}</td>
+                      <td className="py-2 px-3 text-gray-700 text-xs max-w-[150px] whitespace-pre-line">{op.supplier || "—"}</td>
+                      <td className="py-2 px-3 text-gray-500 font-mono text-xs">{op.invoice || "—"}</td>
+                      <td className="py-2 px-3 text-gray-500 text-xs whitespace-nowrap">{op.date || "—"}</td>
+                      <td className={`py-2 px-3 text-right font-semibold tabular-nums text-xs ${op.balance < 0 ? "text-rose-600" : "text-gray-900"}`}>
+                        {op.balance !== 0 ? fmt(op.balance) : "—"}
+                      </td>
+                      <td className="py-2 px-3 text-xs max-w-[220px]">
+                        {editingComment === op.id ? (
+                          <textarea autoFocus value={editCommentVal} onChange={(e) => setEditCommentVal(e.target.value)}
+                            onBlur={() => saveComment(op.id)}
+                            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveComment(op.id); } if (e.key === "Escape") setEditingComment(null); }}
+                            className="w-full min-w-[180px] px-2 py-1 border border-blue-400 rounded text-xs text-gray-800 bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 resize-y" rows={2} />
+                        ) : (
+                          <span onClick={() => startEditComment(op)}
+                            className={`cursor-pointer hover:bg-blue-50 rounded px-1 py-0.5 inline-block min-w-[60px] ${op.comment ? "text-gray-600" : "text-gray-300 italic"}`}>
+                            {op.comment || "добавить..."}
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
               </table>
             </div>
-          ) : <div className="text-slate-500 text-sm">Нет данных об операциях</div>}
-        </Card>
+          ) : (
+            <div className="bg-white p-8 text-center text-gray-400 text-sm">Нет данных об операциях</div>
+          )}
+          <div className="p-3 text-xs text-gray-500 border-t border-gray-200 bg-gray-50">
+            Всего {accOps.length} операций
+          </div>
+        </div>
       )}
 
-      <Modal isOpen={showPayment} onClose={() => setShowPayment(false)} title="Провести платёж">
+      <Modal isOpen={showPayment} onClose={() => setShowPayment(false)} title="Провести перевод">
         <div className="space-y-4">
-          <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 text-blue-300 text-sm">💡 Платёж обновит остаток выбранной инфраструктуры</div>
+          <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 text-blue-300 text-sm">
+            Деньги спишутся со счёта-источника сразу. Зачисление на счёт получателя — после подтверждения с банковской выпиской.
+          </div>
           <div>
-            <label className="text-xs text-slate-400 mb-1 block">Счёт</label>
-            <select value={payment.acc} onChange={(e) => setPayment({ ...payment, acc: e.target.value })} className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white">
-            <option value="">Выберите...</option>
+            <label className="text-xs text-slate-400 mb-1 block">Счёт списания (откуда)</label>
+            <select value={payment.from} onChange={(e) => setPayment({ ...payment, from: e.target.value })} className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white">
+              <option value="">Выберите...</option>
               {balances.map((b) => <option key={b.id} value={b.name}>{b.name} ({b.currency})</option>)}
             </select>
-        </div>
-          <div className="grid grid-cols-2 gap-4">
-            {["income", "expense"].map((t) => (
-              <button key={t} onClick={() => setPayment({ ...payment, type: t })}
-                className={`py-2 rounded-lg text-sm font-medium transition-colors border ${payment.type === t ? (t === "income" ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/30" : "bg-rose-500/20 text-rose-300 border-rose-500/30") : "bg-slate-700/50 text-slate-400 border-slate-600 hover:bg-slate-700"}`}>
-                {t === "income" ? "Приход" : "Расход"}
-              </button>
-            ))}
           </div>
+          <div>
+            <label className="text-xs text-slate-400 mb-1 block">Счёт зачисления (куда)</label>
+            <select value={payment.to} onChange={(e) => setPayment({ ...payment, to: e.target.value })} className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white">
+              <option value="">Выберите...</option>
+              {balances.filter((b) => b.name !== payment.from).map((b) => <option key={b.id} value={b.name}>{b.name} ({b.currency})</option>)}
+            </select>
+          </div>
+          {payment.from && payment.to && (
+            <div className="bg-slate-700/30 rounded-lg p-3 flex items-center justify-center gap-3 text-sm">
+              <span className="text-rose-400 font-medium">{payment.from}</span>
+              <span className="text-amber-400 text-lg">→</span>
+              <span className="text-emerald-400 font-medium">{payment.to}</span>
+            </div>
+          )}
           <InputField label="Сумма" value={payment.amount} onChange={(v) => setPayment({ ...payment, amount: v })} type="number" />
           <InputField label="Описание" value={payment.desc} onChange={(v) => setPayment({ ...payment, desc: v })} />
           <InputField label="Дата" value={payment.date} onChange={(v) => setPayment({ ...payment, date: v })} type="date" />
           <div className="flex justify-end gap-3 pt-2">
             <button onClick={() => setShowPayment(false)} className="px-4 py-2 text-slate-400 hover:text-white text-sm">Отмена</button>
-            <button onClick={processPayment} className="px-6 py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg text-sm font-medium transition-colors">Провести</button>
+            <button onClick={processPayment} disabled={!payment.from || !payment.to || !(parseFloat(payment.amount) > 0)}
+              className={`px-6 py-2 rounded-lg text-sm font-medium transition-colors ${
+                payment.from && payment.to && parseFloat(payment.amount) > 0
+                  ? "bg-emerald-500 hover:bg-emerald-600 text-white" : "bg-slate-700 text-slate-500 cursor-not-allowed"
+              }`}>
+              Провести
+            </button>
+          </div>
         </div>
-      </div>
-    </Modal>
+      </Modal>
     </div>
   );
 };
