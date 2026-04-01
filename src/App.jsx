@@ -1,15 +1,15 @@
-import React, { useState, useMemo, useCallback } from "react";
-import { PO_DATA } from "./data/poData.js";
-import { FIN_DATA } from "./data/finData.js";
-import { DEBTS_DATA } from "./data/debtsData.js";
-import { BALANCES_DATA } from "./data/balancesData.js";
-import { INFRA_DATA } from "./data/infraData.js";
+import React, { useState, useMemo, useCallback, useEffect } from "react";
+import * as api from "./api.js";
 
 // ==================== УТИЛИТЫ ====================
-const downloadBase64File = (base64Data, fileName) => {
-  if (!base64Data) return;
+const downloadFile = (fileIdOrBase64, fileName) => {
+  if (!fileIdOrBase64) return;
   const link = document.createElement("a");
-  link.href = base64Data;
+  if (fileIdOrBase64.startsWith("data:")) {
+    link.href = fileIdOrBase64;
+  } else {
+    link.href = api.getFileUrl(fileIdOrBase64);
+  }
   link.download = fileName || "document";
   document.body.appendChild(link);
   link.click();
@@ -102,39 +102,37 @@ const KanbanDropdown = ({ order, setData, pushLog, syncUpdToFinResults }) => {
     setCancelReasonText("");
   };
 
-  const confirmComplete = () => {
+  const confirmComplete = async () => {
     const hasUpd = !!(updForm.updNum && updForm.updDate && updForm.updFile);
-    if (!hasUpd && !updForm.noGS) return; // нельзя завершить без УПД (номер + дата + скан) или галочки «без GS»
+    if (!hasUpd && !updForm.noGS) return;
 
-    const applyComplete = (fileData) => {
-      pushLog({ type: "po_stage", id: order.id, prev: order.orderStage || "", prevStatus: order.status || "active" });
-      const updates = { orderStage: "done", status: "completed" };
-      if (!updForm.noGS) {
+    pushLog({ type: "po_stage", id: order.id, prev: order.orderStage || "", prevStatus: order.status || "active" });
+    const updates = { orderStage: "done", status: "completed" };
+
+    if (updForm.noGS) {
+      updates.noGlobalSmart = true;
+      updates.hasUpd = true;
+      updates.updNum = "Без участия GS";
+      updates.updDate = "";
+      updates.updFileId = null;
+    } else {
+      try {
+        const uploaded = await api.uploadFile(updForm.updFile, "upd", order.id);
         updates.hasUpd = true;
         updates.updNum = updForm.updNum;
         updates.updDate = updForm.updDate;
-        updates.updFile = fileData;
+        updates.updFileId = uploaded.id;
         updates.noGlobalSmart = false;
+      } catch (err) {
+        console.error("Ошибка загрузки УПД:", err);
+        return;
       }
-      if (updForm.noGS) {
-        updates.noGlobalSmart = true;
-        updates.hasUpd = true;
-        updates.updNum = "Без участия GS";
-        updates.updDate = "";
-        updates.updFile = null;
-      }
-      setData((prev) => prev.map((r) => (r.id === order.id ? { ...r, ...updates } : r)));
-      if (syncUpdToFinResults) {
-        syncUpdToFinResults(order.internalPo, true, updates.updNum, updates.updDate, updates.updFile, updates.noGlobalSmart);
-      }
-      setCompleteModal(false);
-    };
-
-    if (updForm.noGS) {
-      applyComplete(null);
-    } else {
-      applyComplete(updForm.updFile);
     }
+    setData((prev) => prev.map((r) => (r.id === order.id ? { ...r, ...updates } : r)));
+    if (syncUpdToFinResults) {
+      syncUpdToFinResults(order.internalPo, true, updates.updNum, updates.updDate, updates.updFileId, updates.noGlobalSmart);
+    }
+    setCompleteModal(false);
   };
 
   const canComplete = !!(updForm.updNum && updForm.updDate && updForm.updFile) || updForm.noGS;
@@ -220,48 +218,43 @@ const KanbanDropdown = ({ order, setData, pushLog, syncUpdToFinResults }) => {
             <p className="text-sm text-slate-400 mb-4">Для завершения заказа загрузите УПД или отметьте, что заказ без участия Global Smart</p>
 
             <div className="space-y-3 mb-4">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs text-slate-400 mb-1 block">Номер УПД</label>
-                  <input type="text" value={updForm.updNum} onChange={(e) => setUpdForm({ ...updForm, updNum: e.target.value })}
-                    disabled={updForm.noGS}
-                    className={`w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500 ${updForm.noGS ? "opacity-40" : ""}`}
-                    placeholder="Напр.: 123" />
+              <div className={`p-3 rounded-lg border ${updForm.noGS ? "border-slate-700 opacity-40 pointer-events-none" : "border-slate-600"}`}>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-slate-400 mb-1 block">Номер УПД {!updForm.noGS && "*"}</label>
+                    <input type="text" value={updForm.updNum} onChange={(e) => setUpdForm({ ...updForm, updNum: e.target.value })}
+                      className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500"
+                      placeholder="Напр.: 123" disabled={updForm.noGS} />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-400 mb-1 block">Дата УПД {!updForm.noGS && "*"}</label>
+                    <input type="date" value={updForm.updDate} onChange={(e) => setUpdForm({ ...updForm, updDate: e.target.value })}
+                      className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500" disabled={updForm.noGS} />
+                  </div>
                 </div>
-                <div>
-                  <label className="text-xs text-slate-400 mb-1 block">Дата УПД</label>
-                  <input type="date" value={updForm.updDate} onChange={(e) => setUpdForm({ ...updForm, updDate: e.target.value })}
-                    disabled={updForm.noGS}
-                    className={`w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500 ${updForm.noGS ? "opacity-40" : ""}`} />
+                <div className="mt-3">
+                  <label className="text-xs text-slate-400 mb-1 block">Скан УПД (PDF/JPG/PNG) {!updForm.noGS && "*"}</label>
+                  <input type="file" accept=".pdf,.jpg,.jpeg,.png"
+                    onChange={(e) => {
+                      const file = e.target.files[0];
+                      if (!file) return;
+                      setUpdForm((f) => ({ ...f, updFile: file }));
+                    }}
+                    className="w-full text-xs text-slate-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:text-xs file:font-medium file:bg-blue-500 file:text-white file:cursor-pointer hover:file:bg-blue-600" disabled={updForm.noGS} />
+                  {!updForm.updFile && !updForm.noGS && (
+                    <p className="text-[10px] text-rose-400 mt-1">⚠ Без скана УПД заказ завершить нельзя</p>
+                  )}
                 </div>
               </div>
-              <div>
-                <label className={`text-xs text-slate-400 mb-1 block ${updForm.noGS ? "opacity-40" : ""}`}>Скан УПД (PDF/JPG/PNG) *</label>
-                <input type="file" accept=".pdf,.jpg,.jpeg,.png"
-                  disabled={updForm.noGS}
-                  onChange={(e) => {
-                    const file = e.target.files[0];
-                    if (!file) return;
-                    const reader = new FileReader();
-                    reader.onload = (ev) => setUpdForm((f) => ({ ...f, updFile: ev.target.result }));
-                    reader.readAsDataURL(file);
-                  }}
-                  className={`w-full text-xs text-slate-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:text-xs file:font-medium file:bg-blue-500 file:text-white file:cursor-pointer hover:file:bg-blue-600 ${updForm.noGS ? "opacity-40" : ""}`} />
-                {!updForm.noGS && !updForm.updFile && (
-                  <p className="text-[10px] text-rose-400 mt-1">⚠ Без скана УПД заказ завершить нельзя</p>
-                )}
-              </div>
-            </div>
 
-            <div className="border-t border-slate-700 pt-3 mb-4">
-              <label className="flex items-center gap-3 cursor-pointer p-2 rounded-lg hover:bg-slate-700/40 transition-colors">
-                <input type="checkbox" checked={updForm.noGS} onChange={(e) => setUpdForm({ ...updForm, noGS: e.target.checked, ...(e.target.checked ? { updNum: "", updDate: "", updFile: null } : {}) })}
-                  className="w-4 h-4 rounded border-slate-500 text-amber-500 focus:ring-amber-500/30" />
-                <div>
-                  <span className="text-sm text-amber-400 font-medium">Заказ без участия Global Smart</span>
-                  <p className="text-[10px] text-slate-500 mt-0.5">УПД не требуется для данного заказа</p>
-                </div>
-              </label>
+              <div className="p-3 rounded-lg border border-slate-700 bg-slate-800/50">
+                <label className="flex items-center gap-3 cursor-pointer select-none">
+                  <input type="checkbox" checked={updForm.noGS} onChange={(e) => setUpdForm({ ...updForm, noGS: e.target.checked })}
+                    className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500 focus:ring-offset-0" />
+                  <span className="text-sm text-white font-medium">Заказ без участия Global Smart</span>
+                </label>
+                <p className="text-[10px] text-slate-500 mt-1 ml-7">УПД не требуется для заказов, выполненных минуя GS</p>
+              </div>
             </div>
 
             <div className="flex justify-end gap-3">
@@ -365,6 +358,7 @@ const getPoFilterValue = (o, colKey) => {
     case "customerDeadline": return [o.customerDeadline || "(пусто)"];
     case "customerAmount": return [o.customerAmount ? "$" + fmt(o.customerAmount) : "(пусто)"];
     case "paymentStatusCustomer": return [o.paymentStatusCustomer || "(пусто)"];
+    case "dateCustomerPaid": return [o.dateCustomerPaid || "(пусто)"];
     case "internalPoRef": {
       const vals = (o.internalPoRef || "").split("\n").map((s) => s.trim()).filter(Boolean);
       return vals.length ? vals : ["(пусто)"];
@@ -378,11 +372,12 @@ const getPoFilterValue = (o, colKey) => {
       const vals = (o.paymentStatusSupplier || "").split("\n").map((s) => s.trim()).filter(Boolean);
       return vals.length ? vals : ["(пусто)"];
     }
+    case "datePaidSupplier": return [o.datePaidSupplier || "(пусто)"];
     case "payingCompany": {
       const vals = (o.payingCompany || "").split("\n").map((s) => s.trim()).filter(Boolean);
       return vals.length ? vals : ["(пусто)"];
     }
-    case "deliveryPlan": return [parseDeliveryCost(o.deliveryCost).plan || "(пусто)"];
+    case "deliveryPlan": return [o.logisticsPlan || "(пусто)"];
     case "orderStage": {
       const s = ORDER_STAGES.find((st) => st.key === o.orderStage);
       return [s ? s.label : "(не указана)"];
@@ -525,7 +520,7 @@ const getAutoDebts = (finResults, existingDebts, openPoData) => {
   return finResults
     .filter((r) => {
       // Авто-дебиторка только для УПД, загруженных через CRM (есть файл)
-      if (!r.updFile) return false;
+      if (!r.updFileId) return false;
       if (r.status === "cancelled") return false;
       if (r.noGlobalSmart) return false;
       const pf = typeof r.paymentFact === "number" ? r.paymentFact : parseFloat(r.paymentFact) || 0;
@@ -548,7 +543,7 @@ const getAutoDebts = (finResults, existingDebts, openPoData) => {
         dueDate,
         currency: "USD",
         status: "open",
-        payDoc: null,
+        payDocFileId: null,
         payDate: "",
         payComment: "",
         source: "auto",
@@ -696,7 +691,7 @@ const TabBar = ({ tabs, active, onChange }) => (
 );
 
 // ==================== БАЛАНС ====================
-const Dashboard = ({ balances, debts, finResults, openPo }) => {
+const Dashboard = ({ balances, debts, finResults, openPo, infraData }) => {
   const [expandedGroup, setExpandedGroup] = useState(null);
 
   // Группируем балансы по инфраструктуре
@@ -726,13 +721,11 @@ const Dashboard = ({ balances, debts, finResults, openPo }) => {
     if (!row) return [];
     const ops = [];
     row.accounts.forEach((acc) => {
-      // Ищем по name в INFRA_DATA
       const accName = acc.name;
-      // Пробуем несколько вариантов ключей
       const keys = [accName, accName.replace(" USD", "").replace(" GS", " GS"), accName.replace(" GS USD", " GS"), accName.replace(" GS ", " ")];
       for (const key of keys) {
-        if (INFRA_DATA[key]) {
-          INFRA_DATA[key].forEach((op) => ops.push({ ...op, _account: accName, _currency: acc.currency }));
+        if (infraData[key]) {
+          infraData[key].forEach((op) => ops.push({ ...op, _account: accName, _currency: acc.currency }));
           break;
         }
       }
@@ -821,7 +814,7 @@ const Dashboard = ({ balances, debts, finResults, openPo }) => {
           const ops = isExpanded ? getOpsForGroup(row.name) : [];
           const hasOps = row.accounts.some((acc) => {
             const keys = [acc.name, acc.name.replace(" USD", "").replace(" GS", " GS"), acc.name.replace(" GS USD", " GS")];
-            return keys.some((k) => INFRA_DATA[k] && INFRA_DATA[k].length > 0);
+            return keys.some((k) => infraData[k] && infraData[k].length > 0);
           });
 
           return (
@@ -896,37 +889,37 @@ const Dashboard = ({ balances, debts, finResults, openPo }) => {
                     <table className="w-full text-sm">
                       <thead className="sticky top-0 bg-blue-50">
                         <tr className="text-gray-600 text-xs uppercase">
-                          <th className="py-2.5 px-4 text-left font-semibold">Дата</th>
-                          <th className="py-2.5 px-4 text-left font-semibold">Счёт</th>
-                          <th className="py-2.5 px-4 text-left font-semibold">PO / Описание</th>
-                          <th className="py-2.5 px-4 text-right font-semibold text-green-700">Приход</th>
-                          <th className="py-2.5 px-4 text-right font-semibold text-red-700">Расход</th>
-                          <th className="py-2.5 px-4 text-right font-semibold">Комиссии</th>
-                          <th className="py-2.5 px-4 text-left font-semibold">Поставщик / Инвойс</th>
-                          <th className="py-2.5 px-4 text-right font-semibold">Остаток</th>
+                          <th className="py-2.5 px-4 text-center font-semibold">Дата</th>
+                          <th className="py-2.5 px-4 text-center font-semibold">Счёт</th>
+                          <th className="py-2.5 px-4 text-center font-semibold">PO / Описание</th>
+                          <th className="py-2.5 px-4 text-center font-semibold text-green-700">Приход</th>
+                          <th className="py-2.5 px-4 text-center font-semibold text-red-700">Расход</th>
+                          <th className="py-2.5 px-4 text-center font-semibold">Комиссии</th>
+                          <th className="py-2.5 px-4 text-center font-semibold">Поставщик / Инвойс</th>
+                          <th className="py-2.5 px-4 text-center font-semibold">Остаток</th>
                         </tr>
                       </thead>
                       <tbody>
                         {ops.map((op, idx) => (
                           <tr key={`${op._account}-${op.id}`} className={`border-b border-gray-100 hover:bg-blue-50/40 ${idx % 2 === 0 ? "" : "bg-gray-50/30"}`}>
-                            <td className="py-2 px-4 text-gray-700 whitespace-nowrap">{op.date || "—"}</td>
-                            <td className="py-2 px-4 text-gray-500 whitespace-nowrap">{op._currency}</td>
-                            <td className="py-2 px-4 text-gray-900 font-mono text-xs">
+                            <td className="py-2 px-4 text-center text-gray-700 whitespace-nowrap">{op.date || "—"}</td>
+                            <td className="py-2 px-4 text-center text-gray-500 whitespace-nowrap">{op._currency}</td>
+                            <td className="py-2 px-4 text-center text-gray-900 font-mono text-xs">
                               {op.poRef || (op.description ? <span className="text-blue-600 italic font-sans">{op.description}</span> : "—")}
                             </td>
-                            <td className="py-2 px-4 text-right text-green-700 font-semibold tabular-nums">
+                            <td className="py-2 px-4 text-center text-green-700 font-semibold tabular-nums">
                               {op.received ? "+" + fmt(op.received) : ""}
                             </td>
-                            <td className="py-2 px-4 text-right text-red-600 font-semibold tabular-nums">
+                            <td className="py-2 px-4 text-center text-red-600 font-semibold tabular-nums">
                               {op.outgoing ? "-" + fmt(op.outgoing) : ""}
                             </td>
-                            <td className="py-2 px-4 text-right text-amber-600 tabular-nums">
+                            <td className="py-2 px-4 text-center text-amber-600 tabular-nums">
                               {op.bankFees ? fmt(op.bankFees) : ""}
                             </td>
-                            <td className="py-2 px-4 text-gray-600 max-w-[220px] truncate" title={`${op.supplier || ""} ${op.invoice || ""}`}>
+                            <td className="py-2 px-4 text-center text-gray-600 max-w-[220px] truncate" title={`${op.supplier || ""} ${op.invoice || ""}`}>
                               {op.supplier || op.invoice || "—"}
                             </td>
-                            <td className={`py-2 px-4 text-right font-bold tabular-nums ${op.balance < 0 ? "text-red-600" : "text-gray-900"}`}>
+                            <td className={`py-2 px-4 text-center font-bold tabular-nums ${op.balance < 0 ? "text-red-600" : "text-gray-900"}`}>
                               {op.balance !== undefined && op.balance !== 0 ? fmt(op.balance) : "—"}
                             </td>
                           </tr>
@@ -1062,11 +1055,10 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
   const effectivePage = page === -1 ? Math.max(0, pages - 1) : page;
   const slice = filtered.slice(effectivePage * PP, (effectivePage + 1) * PP);
 
-  const doPayment = () => {
+  const doPayment = async () => {
     if (!payModal || !payForm.file) return;
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const payDocData = e.target.result;
+    try {
+      const uploaded = await api.uploadFile(payForm.file, "payments", payModal.id);
       pushLog({
         type: "fin_payment",
         id: payModal.id,
@@ -1075,25 +1067,25 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
       setData((prev) =>
         prev.map((r) =>
           r.id === payModal.id
-            ? { ...r, paymentFact: parseFloat(payForm.amount) || 0, paymentDoc: payDocData, paymentDate: payForm.date }
+            ? { ...r, paymentFact: parseFloat(payForm.amount) || 0, paymentDocFileId: uploaded.id, paymentDate: payForm.date }
             : r
         )
       );
 
-      // Синхронизация: закрываем долг в дебиторке по совпадению PO
       if (setDebts && payModal.customerPo) {
         setDebts((prev) => prev.map((d) => {
           if (d.order === payModal.customerPo && d.status === "open") {
-            return { ...d, status: "closed", payDoc: payDocData, payDate: payForm.date, payComment: `Оплачено через Фин. результат: ₽${payForm.amount}` };
+            return { ...d, status: "closed", payDocFileId: uploaded.id, payDate: payForm.date, payComment: `Оплачено через Фин. результат: ₽${payForm.amount}` };
           }
           return d;
         }));
       }
-
-      setPayModal(null);
-      setPayForm({ amount: "", date: "", file: null });
-    };
-    reader.readAsDataURL(payForm.file);
+    } catch (err) {
+      console.error("Ошибка загрузки платёжки:", err);
+      return;
+    }
+    setPayModal(null);
+    setPayForm({ amount: "", date: "", file: null });
   };
 
   // Kanban-статус: переход на «Выполнен» требует проверки
@@ -1164,72 +1156,67 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
       noGlobalSmart: r.noGlobalSmart || false,
       updNum: r.updNum || "",
       updDate: r.updDate || "",
-      // Оплата поля
-      paymentDoc: r.paymentDoc || null,
+      paymentDocFileId: r.paymentDocFileId || null,
       paymentDate: r.paymentDate || "",
-      _newPayDoc: null, // новый файл платёжки
+      _newPayDoc: null,
     });
     setEditModal(r);
   };
 
-  const saveEdit = () => {
+  const saveEdit = async () => {
     if (!editModal) return;
     pushLog({ type: "fin_edit", id: editModal.id, prev: { ...editModal } });
 
-    // Функция применения обновления
-    const applyUpdate = (newPayDoc) => {
-      const newPaymentFact = parseFloat(editForm.paymentFact) || 0;
-      const oldPaymentFact = parseFloat(editModal.paymentFact) || 0;
-      const finalPayDoc = newPayDoc || editForm.paymentDoc;
+    let finalPayDocFileId = editForm.paymentDocFileId;
+    if (editForm._newPayDoc) {
+      try {
+        const uploaded = await api.uploadFile(editForm._newPayDoc, "payments", editModal.id);
+        finalPayDocFileId = uploaded.id;
+      } catch (err) {
+        console.error("Ошибка загрузки платёжки:", err);
+        return;
+      }
+    }
+
+    const newPaymentFact = parseFloat(editForm.paymentFact) || 0;
+    const oldPaymentFact = parseFloat(editModal.paymentFact) || 0;
 
     setData((prev) =>
-        prev.map((x) =>
-          x.id === editModal.id
-            ? {
-                ...x,
-                customer: editForm.customer,
-                customerPo: editForm.customerPo,
-                orderDate: editForm.orderDate,
-                customerAmount: parseFloat(editForm.customerAmount) || 0,
-                paymentFact: newPaymentFact,
-                supplierPo: editForm.supplierPo,
-                supplierAmount: parseFloat(editForm.supplierAmount) || 0,
-                supplier: editForm.supplier,
-                finalBuyer: editForm.finalBuyer,
-                finAgent: editForm.finAgent,
-                customsCost: parseFloat(editForm.customsCost) || 0,
-                deliveryCost: parseFloat(editForm.deliveryCost) || 0,
-                comment: editForm.comment,
-                type: editForm.type,
-                // Оплата
-                paymentDoc: finalPayDoc,
-                paymentDate: editForm.paymentDate,
-              }
-            : x
-        )
-      );
+      prev.map((x) =>
+        x.id === editModal.id
+          ? {
+              ...x,
+              customer: editForm.customer,
+              customerPo: editForm.customerPo,
+              orderDate: editForm.orderDate,
+              customerAmount: parseFloat(editForm.customerAmount) || 0,
+              paymentFact: newPaymentFact,
+              supplierPo: editForm.supplierPo,
+              supplierAmount: parseFloat(editForm.supplierAmount) || 0,
+              supplier: editForm.supplier,
+              finalBuyer: editForm.finalBuyer,
+              finAgent: editForm.finAgent,
+              customsCost: parseFloat(editForm.customsCost) || 0,
+              deliveryCost: parseFloat(editForm.deliveryCost) || 0,
+              comment: editForm.comment,
+              type: editForm.type,
+              paymentDocFileId: finalPayDocFileId,
+              paymentDate: editForm.paymentDate,
+            }
+          : x
+      )
+    );
 
-      // Синхронизация с дебиторкой: если оплата появилась — закрываем долг
-      if (setDebts && newPaymentFact > 0 && oldPaymentFact === 0 && editModal.customerPo) {
-        setDebts((prev) => prev.map((d) => {
-          if (d.order === editModal.customerPo && d.status === "open") {
-            return { ...d, status: "closed", payDoc: finalPayDoc, payDate: editForm.paymentDate, payComment: `Оплачено через Фин. результат: ${newPaymentFact}` };
-          }
-          return d;
-        }));
-      }
-
-      setEditModal(null);
-    };
-
-    // Читаем новый файл платёжки, если загружен
-    if (editForm._newPayDoc) {
-      const reader = new FileReader();
-      reader.onload = (e) => applyUpdate(e.target.result);
-      reader.readAsDataURL(editForm._newPayDoc);
-    } else {
-      applyUpdate(null);
+    if (setDebts && newPaymentFact > 0 && oldPaymentFact === 0 && editModal.customerPo) {
+      setDebts((prev) => prev.map((d) => {
+        if (d.order === editModal.customerPo && d.status === "open") {
+          return { ...d, status: "closed", payDocFileId: finalPayDocFileId, payDate: editForm.paymentDate, payComment: `Оплачено через Фин. результат: ${newPaymentFact}` };
+        }
+        return d;
+      }));
     }
+
+    setEditModal(null);
   };
 
   return (
@@ -1295,26 +1282,26 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
         <div className="overflow-x-auto">
       <table className="w-full text-sm">
             <thead>
-              <tr className="bg-[#1E3A5F] text-white text-left text-xs uppercase">
+              <tr className="bg-[#1E3A5F] text-white text-center text-xs uppercase">
                 {[
-                  { key: "type", label: "Тип", align: "text-left" },
-                  { key: "customer", label: "Клиент", align: "text-left" },
-                  { key: "customerPo", label: "Internal PO", align: "text-left" },
-                  { key: "orderDate", label: "Дата", align: "text-left" },
-                  { key: "customerAmount", label: "Сумма USD", align: "text-right" },
-                  { key: "upd", label: "УПД", align: "text-left" },
-                  { key: "paymentFact", label: "Оплата факт ₽", align: "text-right" },
-                  { key: "supplierPo", label: "External PO", align: "text-left" },
-                  { key: "supplierAmount", label: "Сумма пост. $", align: "text-right" },
-                  { key: "supplier", label: "Поставщик", align: "text-left" },
-                  { key: "finalBuyer", label: "Структура", align: "text-left" },
-                  { key: "status", label: "Статус", align: "text-left" },
+                  { key: "type", label: "Тип", align: "text-center" },
+                  { key: "customer", label: "Клиент", align: "text-center" },
+                  { key: "customerPo", label: "Internal PO", align: "text-center" },
+                  { key: "orderDate", label: "Дата", align: "text-center" },
+                  { key: "customerAmount", label: "Сумма USD", align: "text-center" },
+                  { key: "upd", label: "УПД", align: "text-center" },
+                  { key: "paymentFact", label: "Оплата факт ₽", align: "text-center" },
+                  { key: "supplierPo", label: "External PO", align: "text-center" },
+                  { key: "supplierAmount", label: "Сумма пост. $", align: "text-center" },
+                  { key: "supplier", label: "Поставщик", align: "text-center" },
+                  { key: "finalBuyer", label: "Структура", align: "text-center" },
+                  { key: "status", label: "Статус", align: "text-center" },
                 ].map((col) => {
                   const isActive = columnFilters[col.key]?.size > 0;
                   const isOpen = openFilter === col.key;
                   return (
                     <th key={col.key} className={`py-3 px-2 font-semibold relative ${col.align}`}>
-                      <div className={`flex items-center gap-1 ${col.align === "text-right" ? "justify-end" : ""}`}>
+                      <div className="flex items-center justify-center gap-1">
                         <span>{col.label}</span>
                         <button
                           onClick={(e) => { e.stopPropagation(); setOpenFilter(isOpen ? null : col.key); }}
@@ -1347,11 +1334,11 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
                   }`}
                   onClick={() => setDetailModal(r)}
                 >
-                  <td className="py-2.5 px-2"><TypeBadge type={r.type} /></td>
-                  <td className="py-2.5 px-2 text-gray-900 font-semibold text-xs max-w-[140px] truncate">{r.customer}</td>
-                  <td className="py-2.5 px-2 text-[#1E3A5F] font-mono text-xs max-w-[110px] truncate">{r.customerPo}</td>
-                  <td className="py-2.5 px-2 text-gray-600 text-xs whitespace-nowrap">{r.orderDate}</td>
-                  <td className="py-2.5 px-2 text-right text-green-700 font-mono text-xs font-semibold">${fmt(r.customerAmount)}</td>
+                  <td className="py-2.5 px-2 text-center"><TypeBadge type={r.type} /></td>
+                  <td className="py-2.5 px-2 text-center text-gray-900 font-semibold text-xs max-w-[140px] truncate">{r.customer}</td>
+                  <td className="py-2.5 px-2 text-center text-[#1E3A5F] font-mono text-xs max-w-[110px] truncate">{r.customerPo}</td>
+                  <td className="py-2.5 px-2 text-center text-gray-600 text-xs whitespace-nowrap">{r.orderDate}</td>
+                  <td className="py-2.5 px-2 text-center text-green-700 font-mono text-xs font-semibold">${fmt(r.customerAmount)}</td>
                   <td className="py-2.5 px-2">
                     {r.noGlobalSmart ? (
                       <div className="text-blue-600 cursor-help text-xs leading-tight font-medium" title="Заказ без участия Global Smart">
@@ -1361,8 +1348,8 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
                       <div title={r.orderStatus} className="text-emerald-600 text-xs leading-tight">
                         <div className="cursor-help">✅ УПД №{r.updNum || "—"}</div>
                         <div className="text-emerald-500 text-[10px] mt-0.5">от {r.updDate || "—"}
-                          {r.updFile && (
-                            <button onClick={(e) => { e.stopPropagation(); downloadBase64File(r.updFile, `УПД_${r.updNum || r.customerPo}.pdf`); }}
+                          {r.updFileId && (
+                            <button onClick={(e) => { e.stopPropagation(); downloadFile(r.updFileId, `УПД_${r.updNum || r.customerPo}.pdf`); }}
                               className="ml-1 text-blue-500 hover:text-blue-700 font-medium" title="Скачать УПД">⬇</button>
                           )}
                         </div>
@@ -1371,14 +1358,14 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
                       <span className="text-gray-400 text-xs">—</span>
                     )}
                   </td>
-                  <td className="py-2.5 px-2 text-right">
+                  <td className="py-2.5 px-2 text-center">
                     {r.paymentFact > 0 ? (
-                      <div className="flex items-center justify-end gap-1">
+                      <div className="flex items-center justify-center gap-1">
                         <span className="text-emerald-700 font-mono text-xs font-semibold" title={`₽${r.paymentFact.toLocaleString("ru-RU")}`}>
                           ₽{fmt(r.paymentFact)}
                         </span>
-                        {r.paymentDoc && (
-                          <button onClick={(e) => { e.stopPropagation(); downloadBase64File(r.paymentDoc, `Платёжка_${r.customerPo}.pdf`); }}
+                        {r.paymentDocFileId && (
+                          <button onClick={(e) => { e.stopPropagation(); downloadFile(r.paymentDocFileId, `Платёжка_${r.customerPo}.pdf`); }}
                             className="text-blue-500 hover:text-blue-700 text-[10px] font-medium" title="Скачать платёжку">⬇</button>
                         )}
                       </div>
@@ -1392,10 +1379,10 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
                       </button>
                     )}
                   </td>
-                  <td className="py-2.5 px-2 text-gray-700 font-mono text-xs max-w-[100px] truncate">{r.supplierPo}</td>
-                  <td className="py-2.5 px-2 text-right text-gray-700 font-mono text-xs">{r.supplierAmount ? "$" + fmt(r.supplierAmount) : "—"}</td>
-                  <td className="py-2.5 px-2 text-gray-700 text-xs max-w-[120px] truncate">{r.supplier}</td>
-                  <td className="py-2.5 px-2 text-gray-600 text-xs max-w-[80px] truncate">{r.finalBuyer || "—"}</td>
+                  <td className="py-2.5 px-2 text-center text-gray-700 font-mono text-xs max-w-[100px] truncate">{r.supplierPo}</td>
+                  <td className="py-2.5 px-2 text-center text-gray-700 font-mono text-xs">{r.supplierAmount ? "$" + fmt(r.supplierAmount) : "—"}</td>
+                  <td className="py-2.5 px-2 text-center text-gray-700 text-xs max-w-[120px] truncate">{r.supplier}</td>
+                  <td className="py-2.5 px-2 text-center text-gray-600 text-xs max-w-[80px] truncate">{r.finalBuyer || "—"}</td>
                   <td className="py-2.5 px-2" onClick={(e) => e.stopPropagation()}>
                     <FinStatusDropdown order={r} onChangeStatus={handleFinStage} />
                   </td>
@@ -1571,8 +1558,8 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
             ) : detailModal.hasUpd ? (
               <div className="bg-emerald-500/10 border border-emerald-500/20 p-3 rounded-lg text-emerald-300 text-sm flex items-center justify-between">
                 <span>✅ УПД №{detailModal.updNum} от {detailModal.updDate}</span>
-                {detailModal.updFile && (
-                  <button onClick={() => downloadBase64File(detailModal.updFile, `УПД_${detailModal.updNum || detailModal.customerPo}.pdf`)}
+                {detailModal.updFileId && (
+                  <button onClick={() => downloadFile(detailModal.updFileId, `УПД_${detailModal.updNum || detailModal.customerPo}.pdf`)}
                     className="px-3 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 rounded-lg text-xs font-medium transition-colors">⬇ Скачать</button>
                 )}
               </div>
@@ -1640,10 +1627,10 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
               </div>
               <div className="mt-3">
                 <label className="text-xs text-slate-400 mb-1 block">Платёжный документ</label>
-                {editForm.paymentDoc && !editForm._newPayDoc && (
+                {editForm.paymentDocFileId && !editForm._newPayDoc && (
                   <div className="flex items-center gap-2 mb-2">
                     <span className="text-xs text-blue-400">✅ Платёжка загружена</span>
-                    <button onClick={() => setEditForm({ ...editForm, paymentDoc: null })} className="text-xs text-rose-400 hover:text-rose-300">✕ Удалить</button>
+                    <button onClick={() => setEditForm({ ...editForm, paymentDocFileId: null })} className="text-xs text-rose-400 hover:text-rose-300">✕ Удалить</button>
                   </div>
                 )}
                 {editForm._newPayDoc && (
@@ -1948,11 +1935,10 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
   const cancelInlineEdit = () => setInlineEdit(null);
 
   // Синхронизация УПД: OpenPO → Фин. результат (по совпадению PO клиента)
-  const syncUpdToFinResults = useCallback((poInternalPo, hasUpd, updNum, updDate, updFile, noGlobalSmart) => {
+  const syncUpdToFinResults = useCallback((poInternalPo, hasUpd, updNum, updDate, updFileId, noGlobalSmart) => {
     if (!setFinResults) return;
     setFinResults((prev) =>
       prev.map((fr) => {
-        // Ищем совпадение по PO клиента (Internal PO в OpenPO = customerPo в FinResults)
         if (fr.customerPo === poInternalPo) {
           if (hasUpd) {
             return {
@@ -1961,12 +1947,11 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
               noGlobalSmart: !!noGlobalSmart,
               updNum: updNum || fr.updNum,
               updDate: updDate || fr.updDate,
-              updFile: updFile || fr.updFile,
+              updFileId: updFileId || fr.updFileId,
               orderStatus: noGlobalSmart ? "Без участия GS" : (updNum ? `УПД №${updNum} от ${updDate}` : fr.orderStatus),
             };
           } else {
-            // УПД удалена — убираем из FinResults и, следовательно, из Дебиторки
-            return { ...fr, hasUpd: false, noGlobalSmart: false, updNum: "", updDate: "", updFile: null, orderStatus: "" };
+            return { ...fr, hasUpd: false, noGlobalSmart: false, updNum: "", updDate: "", updFileId: null, orderStatus: "" };
           }
         }
         return fr;
@@ -1976,7 +1961,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
   const [newPO, setNewPO] = useState({
     customer: "", respSales: "", internalPo: "", dateOrdered: new Date().toISOString().split("T")[0],
     customerDeadline: "", termsDelivery: "", customerAmount: 0, paymentStatusCustomer: "",
-    dateCustomerPaid: "",
+    dateCustomerPaid: "", datePaidSupplier: "",
     deliveryCost: 0, awb: "", tracking: "", comments: "", mgmtComments: "",
     type: "domestic",
     externalOrders: [{ po: "", supplier: "", supplierAmount: 0, payment: "", payingCompany: "", datePlaced: "", respProcurement: "", logisticsPlan: "", cancelled: false }],
@@ -1984,8 +1969,8 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
   const PP = 30;
 
   const FILTER_COL_KEYS = ["num", "customer", "internalPo", "dateOrdered", "customerDeadline",
-    "customerAmount", "paymentStatusCustomer", "internalPoRef", "supplierName", "supplierAmount",
-    "paymentStatusSupplier", "payingCompany", "deliveryPlan", "orderStage", "upd"];
+    "customerAmount", "paymentStatusCustomer", "dateCustomerPaid", "internalPoRef", "supplierName", "supplierAmount",
+    "paymentStatusSupplier", "datePaidSupplier", "payingCompany", "deliveryPlan", "orderStage", "upd"];
 
   const uniqueValuesMap = useMemo(() => {
     let pool = [...data];
@@ -2038,53 +2023,45 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
   const effectivePage = page === -1 ? Math.max(0, pages - 1) : page;
   const slice = filtered.slice(effectivePage * PP, (effectivePage + 1) * PP);
 
-  const doUpd = () => {
+  const doUpd = async () => {
     if (!updModal) return;
-    // Для обычных заказов — обязательны номер УПД, дата и скан
     if (!updForm.noGS && (!updForm.file || !updForm.num || !updForm.date)) return;
 
-    const applyPoUpdate = (fileData) => {
-      pushLog({
-        type: "po_upd",
-        id: updModal.id,
-        prev: { hasUpd: updModal.hasUpd, updNum: updModal.updNum, updDate: updModal.updDate, mgmtComments: updModal.mgmtComments, noGlobalSmart: updModal.noGlobalSmart },
-      });
-      if (updForm.noGS) {
+    pushLog({
+      type: "po_upd",
+      id: updModal.id,
+      prev: { hasUpd: updModal.hasUpd, updNum: updModal.updNum, updDate: updModal.updDate, mgmtComments: updModal.mgmtComments, noGlobalSmart: updModal.noGlobalSmart },
+    });
+
+    if (updForm.noGS) {
       setData((prev) =>
         prev.map((r) =>
           r.id === updModal.id
-            ? {
-                  ...r, hasUpd: true, noGlobalSmart: true, updNum: "Без участия GS", updDate: "", updFile: null,
-                  mgmtComments: `${r.mgmtComments ? r.mgmtComments + "\n" : ""}Без участия GS`,
-                }
-              : r
-          )
-        );
-        syncUpdToFinResults(updModal.internalPo, true, "Без участия GS", "", null, true);
-      } else {
-        setData((prev) =>
-          prev.map((r) =>
-            r.id === updModal.id
-              ? {
-                  ...r, hasUpd: true, noGlobalSmart: false, updNum: updForm.num, updDate: updForm.date, updFile: fileData,
-                mgmtComments: `${r.mgmtComments ? r.mgmtComments + "\n" : ""}УПД №${updForm.num} от ${updForm.date}`,
-              }
+            ? { ...r, hasUpd: true, noGlobalSmart: true, updNum: "Без участия GS", updDate: "", updFileId: null,
+                mgmtComments: `${r.mgmtComments ? r.mgmtComments + "\n" : ""}Без участия GS` }
             : r
         )
       );
-        syncUpdToFinResults(updModal.internalPo, true, updForm.num, updForm.date, fileData, false);
-      }
-      setUpdModal(null);
-      setUpdForm({ num: "", date: "", file: null, noGS: false });
-    };
-
-    if (updForm.noGS) {
-      applyPoUpdate(null);
+      syncUpdToFinResults(updModal.internalPo, true, "Без участия GS", "", null, true);
     } else {
-      const reader = new FileReader();
-      reader.onload = (e) => applyPoUpdate(e.target.result);
-    reader.readAsDataURL(updForm.file);
+      try {
+        const uploaded = await api.uploadFile(updForm.file, "upd", updModal.id);
+        setData((prev) =>
+          prev.map((r) =>
+            r.id === updModal.id
+              ? { ...r, hasUpd: true, noGlobalSmart: false, updNum: updForm.num, updDate: updForm.date, updFileId: uploaded.id,
+                  mgmtComments: `${r.mgmtComments ? r.mgmtComments + "\n" : ""}УПД №${updForm.num} от ${updForm.date}` }
+              : r
+          )
+        );
+        syncUpdToFinResults(updModal.internalPo, true, updForm.num, updForm.date, uploaded.id, false);
+      } catch (err) {
+        console.error("Ошибка загрузки УПД:", err);
+        return;
+      }
     }
+    setUpdModal(null);
+    setUpdForm({ num: "", date: "", file: null, noGS: false });
   };
 
   const cancelOrder = () => {
@@ -2126,17 +2103,28 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
       customer: r.customer, respSales: r.respSales, internalPo: r.internalPo,
       customerAmount: r.customerAmount,
       paymentStatusCustomer: r.paymentStatusCustomer,
+      dateCustomerPaid: r.dateCustomerPaid || "",
+      datePaidSupplier: r.datePaidSupplier || "",
       comments: r.comments, awb: r.awb, tracking: r.tracking,
       customerDeadline: r.customerDeadline, termsDelivery: r.termsDelivery,
       hasUpd: r.hasUpd || false, noGlobalSmart: r.noGlobalSmart || false,
-      updNum: r.updNum || "", updDate: r.updDate || "", updFile: r.updFile || null,
+      updNum: r.updNum || "", updDate: r.updDate || "", updFileId: r.updFileId || null,
       externalOrders: exts,
     });
   };
 
-  const saveEdit = () => {
+  const saveEdit = async () => {
     if (!editModal) return;
     pushLog({ type: "po_edit", id: editModal.id, prev: { ...editModal } });
+    if (editForm._newUpdFile) {
+      try {
+        const uploaded = await api.uploadFile(editForm._newUpdFile, "upd", editModal.id);
+        editForm.updFileId = uploaded.id;
+      } catch (err) {
+        console.error("Ошибка загрузки УПД:", err);
+        return;
+      }
+    }
     const exts = editForm.externalOrders || [];
     const updatedForm = {
       ...editForm,
@@ -2150,7 +2138,6 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
       respProcurement: exts.map((e) => e.respProcurement).join("\n"),
       logisticsPlan: exts.map((e) => e.logisticsPlan).join("\n"),
     };
-    // Автозапись причин отмены ext PO в комментарии
     const prevExts = parseExternalPOs(editModal);
     const cancelComments = [];
     exts.forEach((ext, i) => {
@@ -2166,33 +2153,19 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
         : cancelComments.join("\n");
     }
     delete updatedForm.externalOrders;
-    // Если удалили УПД — сбросить поля
-    if (!updatedForm.hasUpd) {
-      updatedForm.updNum = "";
-      updatedForm.updDate = "";
-      updatedForm.updFile = null;
-      updatedForm.noGlobalSmart = false;
-    }
-    if (updatedForm.noGlobalSmart) {
-      updatedForm.hasUpd = true;
-      updatedForm.updNum = "Без участия GS";
-      updatedForm.updDate = "";
-      updatedForm.updFile = null;
-    }
+    delete updatedForm._newUpdFile;
     setData((prev) => prev.map((r) => (r.id === editModal.id ? { ...r, ...updatedForm } : r)));
-    // Синхронизация → Фин. результат → Дебиторка
-    syncUpdToFinResults(editModal.internalPo, updatedForm.hasUpd, updatedForm.updNum, updatedForm.updDate, updatedForm.updFile, updatedForm.noGlobalSmart);
+    syncUpdToFinResults(editModal.internalPo, updatedForm.hasUpd, updatedForm.updNum, updatedForm.updDate, updatedForm.updFileId, updatedForm.noGlobalSmart);
     setEditModal(null);
   };
 
   const emptyExtPO = { po: "", supplier: "", supplierAmount: 0, payment: "", payingCompany: "", datePlaced: "", respProcurement: "", logisticsPlan: "", cancelled: false, cancelReason: "" };
-  const handleAddPO = () => {
-    const id = Math.max(...data.map((o) => o.id), 0) + 1;
+  const handleAddPO = async () => {
     const num = String(data.length + 1);
     const exts = newPO.externalOrders || [emptyExtPO];
     const assembled = {
       ...newPO,
-      id, num, status: "active", hasUpd: false, updNum: "", updDate: "", updFile: null, cancelReason: "",
+      num, status: "active", hasUpd: false, updNum: "", updDate: "", updFileId: null, cancelReason: "",
       customerAmount: parseFloat(newPO.customerAmount) || 0,
       supplierAmount: exts.reduce((s, e) => s + (parseFloat(e.supplierAmount) || 0), 0),
       deliveryCost: parseFloat(newPO.deliveryCost) || 0,
@@ -2205,7 +2178,6 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
       respProcurement: exts.map((e) => e.respProcurement).join("\n"),
       logisticsPlan: exts.map((e) => e.logisticsPlan).join("\n"),
     };
-    // Автозапись причин отмены ext PO в комментарии нового заказа
     const cancelComments = exts
       .filter((ext) => ext.cancelled && ext.cancelReason)
       .map((ext) => `[${new Date().toLocaleDateString("ru-RU")}] ОТМЕНА PO ${ext.po}: ${ext.cancelReason}`);
@@ -2215,40 +2187,46 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
         : cancelComments.join("\n");
     }
     delete assembled.externalOrders;
-    setData([...data, assembled]);
+    try {
+      const saved = await api.createPO(assembled);
+      saved.customerAmount = parseFloat(saved.customerAmount) || 0;
+      saved.supplierAmount = parseFloat(saved.supplierAmount) || 0;
+      saved.orderStage = saved.orderStage || "in_work";
+      setData((prev) => [...prev, saved]);
 
-    // Авто-создание записи в Фин. результат
-    if (setFinResults) {
-      const activeExts = exts.filter((e) => !e.cancelled);
-      const finEntry = {
-        id: Date.now(),
-        customer: newPO.customer || "",
-        customerPo: newPO.internalPo || "",
-        orderDate: newPO.dateOrdered || "",
-        customerAmount: parseFloat(newPO.customerAmount) || 0,
-        orderStatus: "",
-        paymentFact: 0,
-        supplierPo: activeExts.map((e) => e.po).join(", "),
-        supplierAmount: activeExts.reduce((s, e) => s + (parseFloat(e.supplierAmount) || 0), 0),
-        supplier: activeExts.map((e) => e.supplier).filter(Boolean).join(", "),
-        finalBuyer: activeExts.map((e) => e.payingCompany).filter(Boolean)[0] || "",
-        finAgent: "",
-        customsCost: 0,
-        deliveryCost: 0,
-        comment: "",
-        type: newPO.type || "domestic",
-        status: "active",
-        hasUpd: false,
-        noGlobalSmart: false,
-        updNum: "",
-        updDate: "",
-        updFile: null,
-        paymentDoc: null,
-        paymentDate: "",
-      };
-      setFinResults((prev) => [...prev, finEntry]);
+      if (setFinResults) {
+        const activeExts = exts.filter((e) => !e.cancelled);
+        const finEntry = {
+          customer: newPO.customer || "",
+          customerPo: newPO.internalPo || "",
+          orderDate: newPO.dateOrdered || "",
+          customerAmount: parseFloat(newPO.customerAmount) || 0,
+          orderStatus: "",
+          paymentFact: 0,
+          supplierPo: activeExts.map((e) => e.po).join(", "),
+          supplierAmount: activeExts.reduce((s, e) => s + (parseFloat(e.supplierAmount) || 0), 0),
+          supplier: activeExts.map((e) => e.supplier).filter(Boolean).join(", "),
+          finalBuyer: activeExts.map((e) => e.payingCompany).filter(Boolean)[0] || "",
+          finAgent: "",
+          customsCost: 0,
+          deliveryCost: 0,
+          comment: "",
+          type: newPO.type || "domestic",
+          status: "active",
+          hasUpd: false,
+          noGlobalSmart: false,
+          updNum: "",
+          updDate: "",
+        };
+        const savedFin = await api.createFin(finEntry);
+        savedFin.customerAmount = parseFloat(savedFin.customerAmount) || 0;
+        savedFin.supplierAmount = parseFloat(savedFin.supplierAmount) || 0;
+        savedFin.paymentFact = parseFloat(savedFin.paymentFact) || 0;
+        setFinResults((prev) => [...prev, savedFin]);
+      }
+    } catch (err) {
+      console.error("Ошибка создания PO:", err);
     }
-
     setShowAdd(false);
     setNewPO({
       customer: "", respSales: "", internalPo: "", dateOrdered: new Date().toISOString().split("T")[0],
@@ -2320,27 +2298,29 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
               <tr className="bg-[#1E3A5F] text-white">
                 <th className="py-2.5 px-1 text-center font-semibold w-7"></th>
                 {[
-                  { key: "num", label: "№", align: "text-left" },
-                  { key: "customer", label: "Клиент", align: "text-left" },
-                  { key: "internalPo", label: "PO", align: "text-left" },
-                  { key: "dateOrdered", label: "Дата", align: "text-left" },
-                  { key: "customerDeadline", label: "Дедлайн", align: "text-left" },
-                  { key: "customerAmount", label: "Сумма $", align: "text-right" },
-                  { key: "paymentStatusCustomer", label: "Оплата клиента", align: "text-left" },
-                  { key: "internalPoRef", label: "External PO", align: "text-left" },
-                  { key: "supplierName", label: "Поставщик", align: "text-left" },
-                  { key: "supplierAmount", label: "Сумма пост.", align: "text-right" },
-                  { key: "paymentStatusSupplier", label: "Оплата пост.", align: "text-left" },
-                  { key: "payingCompany", label: "Плат. компания", align: "text-left" },
-                  { key: "deliveryPlan", label: "Дост. план", align: "text-left" },
-                  { key: "orderStage", label: "Стадия", align: "text-left" },
-                  { key: "upd", label: "УПД", align: "text-left" },
+                  { key: "num", label: "№", align: "text-center" },
+                  { key: "customer", label: "Клиент", align: "text-center" },
+                  { key: "internalPo", label: "PO", align: "text-center" },
+                  { key: "dateOrdered", label: "Дата", align: "text-center" },
+                  { key: "customerDeadline", label: "Дедлайн", align: "text-center" },
+                  { key: "customerAmount", label: "Сумма $", align: "text-center" },
+                  { key: "paymentStatusCustomer", label: "Оплата кл.", align: "text-center" },
+                  { key: "dateCustomerPaid", label: "Дата опл. кл.", align: "text-center" },
+                  { key: "internalPoRef", label: "External PO", align: "text-center" },
+                  { key: "supplierName", label: "Поставщик", align: "text-center" },
+                  { key: "supplierAmount", label: "Сумма пост.", align: "text-center" },
+                  { key: "paymentStatusSupplier", label: "Оплата пост.", align: "text-center" },
+                  { key: "datePaidSupplier", label: "Дата опл. пост.", align: "text-center" },
+                  { key: "payingCompany", label: "Плат. компания", align: "text-center" },
+                  { key: "deliveryPlan", label: "Дост. план", align: "text-center" },
+                  { key: "orderStage", label: "Стадия", align: "text-center" },
+                  { key: "upd", label: "УПД", align: "text-center" },
                 ].map((col) => {
                   const isActive = columnFilters[col.key]?.size > 0;
                   const isOpen = openFilter === col.key;
                   return (
                     <th key={col.key} className={`py-2.5 px-2 font-semibold relative ${col.align}`}>
-                      <div className={`flex items-center gap-1 ${col.align === "text-right" ? "justify-end" : ""}`}>
+                      <div className="flex items-center justify-center gap-1">
                         <span>{col.label}</span>
                         <button
                           onClick={(e) => { e.stopPropagation(); setOpenFilter(isOpen ? null : col.key); }}
@@ -2387,13 +2367,13 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                         {isExpanded ? "▾" : "▸"}
                       </button>
                     </td>
-                    <td className="py-2 px-2 text-gray-500">{o.num}</td>
-                    <td className="py-2 px-2 text-[#1E3A5F] font-semibold max-w-[140px] truncate">{o.customer}</td>
-                    <td className="py-2 px-2 text-gray-900 font-mono text-xs max-w-[120px] truncate">{o.internalPo}</td>
-                    <td className="py-2 px-2 text-gray-600 whitespace-nowrap">{o.dateOrdered || "—"}</td>
-                    <td className="py-2 px-2 text-gray-600 whitespace-nowrap text-xs">{o.customerDeadline || "—"}</td>
-                    <td className="py-2 px-2 text-right text-gray-900 font-semibold tabular-nums whitespace-nowrap">${fmt(o.customerAmount)}</td>
-                    <td className="py-2 px-2 max-w-[120px] relative" onClick={(e) => e.stopPropagation()}>
+                    <td className="py-2 px-2 text-center text-gray-500">{o.num}</td>
+                    <td className="py-2 px-2 text-center text-[#1E3A5F] font-semibold max-w-[140px] truncate">{o.customer}</td>
+                    <td className="py-2 px-2 text-center text-gray-900 font-mono text-xs max-w-[120px] truncate">{o.internalPo}</td>
+                    <td className="py-2 px-2 text-center text-gray-600 whitespace-nowrap">{o.dateOrdered || "—"}</td>
+                    <td className="py-2 px-2 text-center text-gray-600 whitespace-nowrap text-xs">{o.customerDeadline || "—"}</td>
+                    <td className="py-2 px-2 text-center text-gray-900 font-semibold tabular-nums whitespace-nowrap">${fmt(o.customerAmount)}</td>
+                    <td className="py-2 px-2 text-center max-w-[120px] relative" onClick={(e) => e.stopPropagation()}>
                       {inlineEdit && inlineEdit.id === o.id && inlineEdit.field === "paymentStatusCustomer" ? (
                         <div className="absolute z-50 top-0 left-0 bg-white rounded-lg shadow-xl border border-gray-200 py-1 min-w-[130px]">
                           {["Paid", "Not paid", "NET 5", "NET 7", "NET 10", "NET 30"].map((opt) => (
@@ -2412,8 +2392,23 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                         </span>
                       )}
                     </td>
+                    {/* Дата оплаты клиента */}
+                    <td className="py-2 px-2 text-center text-gray-600 whitespace-nowrap text-xs" onClick={(e) => e.stopPropagation()}>
+                      {inlineEdit && inlineEdit.id === o.id && inlineEdit.field === "dateCustomerPaid" ? (
+                        <input type="date" autoFocus value={inlineEdit.value || ""}
+                          onChange={(e) => setInlineEdit({ ...inlineEdit, value: e.target.value })}
+                          onBlur={() => { pushLog({ type: "po_inline_edit", id: o.id, field: "dateCustomerPaid", prev: o.dateCustomerPaid || "" }); setData((prev) => prev.map((x) => x.id === o.id ? { ...x, dateCustomerPaid: inlineEdit.value } : x)); setInlineEdit(null); }}
+                          onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); if (e.key === "Escape") setInlineEdit(null); }}
+                          className="w-24 px-1 py-0.5 border border-blue-400 rounded text-xs text-center" />
+                      ) : (
+                        <span onClick={() => setInlineEdit({ id: o.id, field: "dateCustomerPaid", value: o.dateCustomerPaid || "" })}
+                          className="cursor-pointer hover:bg-blue-50 px-1 py-0.5 rounded transition-colors">
+                          {o.dateCustomerPaid || "—"}
+                        </span>
+                      )}
+                    </td>
                     {/* External PO — номера с зачёркиванием */}
-                    <td className="py-2 px-2 font-mono text-xs max-w-[120px]">
+                    <td className="py-2 px-2 text-center font-mono text-xs max-w-[120px]">
                       {(() => {
                         const refs = (o.internalPoRef || "").split("\n").map((s) => s.trim()).filter(Boolean);
                         if (!refs.length) return <span className="text-gray-400">—</span>;
@@ -2435,22 +2430,21 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                       const payments = active.map((e) => e.payment).filter(Boolean);
                       const companies = active.map((e) => e.payingCompany).filter(Boolean);
                       return (<>
-                        <td className="py-2 px-2 text-xs max-w-[120px]">
+                        <td className="py-2 px-2 text-center text-xs max-w-[120px]">
                           {!suppliers.length ? <span className="text-gray-400">—</span> :
                             suppliers.length === 1 ? <span className="text-gray-700 truncate block">{suppliers[0]}</span> :
                             <div className="space-y-0.5">{suppliers.map((n, i) => <div key={i} className="text-gray-700 truncate text-[10px] leading-tight">{n}</div>)}</div>}
                         </td>
-                        <td className="py-2 px-2 text-right text-gray-700 tabular-nums whitespace-nowrap text-xs">
+                        <td className="py-2 px-2 text-center text-gray-700 tabular-nums whitespace-nowrap text-xs">
                           {amounts.length > 1 ? <div className="space-y-0.5">{amounts.map((a, i) => <div key={i} className="text-[10px] leading-tight">${fmt(parseFloat(a) || 0)}</div>)}</div>
                             : amounts.length === 1 ? "$" + fmt(parseFloat(amounts[0]) || 0)
                             : o.supplierAmount ? "$" + fmt(o.supplierAmount) : "—"}
                         </td>
-                        <td className="py-2 px-2 max-w-[120px] relative" onClick={(e) => e.stopPropagation()}>
+                        <td className="py-2 px-2 text-center max-w-[120px] relative" onClick={(e) => e.stopPropagation()}>
                           {inlineEdit && inlineEdit.id === o.id && inlineEdit.field === "paymentStatusSupplier" ? (
                             <div className="absolute z-50 top-0 left-0 bg-white rounded-lg shadow-xl border border-gray-200 py-1 min-w-[120px]">
                               {["Paid", "Not paid"].map((opt) => (
                                 <button key={opt} onClick={() => {
-                                  // Обновляем статус для всех активных external PO
                                   const exts = parseExternalPOs(o);
                                   const updatedPayments = exts.map((e) => e.cancelled ? e.payment : opt).join("\n");
                                   pushLog({ type: "po_inline_edit", id: o.id, field: "paymentStatusSupplier", prev: o.paymentStatusSupplier || "" });
@@ -2473,11 +2467,26 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                             </div>;
                           })()}
                         </td>
-                        <td className="py-2 px-2 text-gray-600 text-xs max-w-[80px] truncate">{companies.length > 0 ? companies.join(", ") : "—"}</td>
+                        {/* Дата оплаты поставщику */}
+                        <td className="py-2 px-2 text-center text-gray-600 whitespace-nowrap text-xs" onClick={(e) => e.stopPropagation()}>
+                          {inlineEdit && inlineEdit.id === o.id && inlineEdit.field === "datePaidSupplier" ? (
+                            <input type="date" autoFocus value={inlineEdit.value || ""}
+                              onChange={(e) => setInlineEdit({ ...inlineEdit, value: e.target.value })}
+                              onBlur={() => { pushLog({ type: "po_inline_edit", id: o.id, field: "datePaidSupplier", prev: o.datePaidSupplier || "" }); setData((prev) => prev.map((x) => x.id === o.id ? { ...x, datePaidSupplier: inlineEdit.value } : x)); setInlineEdit(null); }}
+                              onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); if (e.key === "Escape") setInlineEdit(null); }}
+                              className="w-24 px-1 py-0.5 border border-blue-400 rounded text-xs text-center" />
+                          ) : (
+                            <span onClick={() => setInlineEdit({ id: o.id, field: "datePaidSupplier", value: o.datePaidSupplier || "" })}
+                              className="cursor-pointer hover:bg-blue-50 px-1 py-0.5 rounded transition-colors">
+                              {o.datePaidSupplier || "—"}
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-2 px-2 text-center text-gray-600 text-xs max-w-[80px] truncate">{companies.length > 0 ? companies.join(", ") : "—"}</td>
                       </>);
                     })()}
-                    <td className="py-2 px-2 text-gray-600 text-xs max-w-[80px] truncate">{parseDeliveryCost(o.deliveryCost).plan || "—"}</td>
-                    <td className="py-2 px-2" onClick={(e) => e.stopPropagation()}>
+                    <td className="py-2 px-2 text-center text-gray-600 text-xs max-w-[80px] truncate">{o.logisticsPlan || "—"}</td>
+                    <td className="py-2 px-2 text-center" onClick={(e) => e.stopPropagation()}>
                       <KanbanDropdown order={o} setData={setData} pushLog={pushLog} syncUpdToFinResults={syncUpdToFinResults} />
                     </td>
                     <td className="py-2 px-2 text-center">
@@ -2490,8 +2499,8 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                           <span className="cursor-help" title={`УПД №${o.updNum} от ${o.updDate}`}>
                             ✅ <span className="text-emerald-700 font-medium">УПД №{o.updNum || "—"} от {o.updDate || "—"}</span>
                           </span>
-                          {o.updFile && (
-                            <button onClick={(e) => { e.stopPropagation(); downloadBase64File(o.updFile, `УПД_${o.updNum || o.internalPo}.pdf`); }}
+                          {o.updFileId && (
+                            <button onClick={(e) => { e.stopPropagation(); downloadFile(o.updFileId, `УПД_${o.updNum || o.internalPo}.pdf`); }}
                               className="ml-1 text-blue-500 hover:text-blue-700 text-[10px] font-medium" title="Скачать УПД">⬇</button>
                           )}
                         </div>
@@ -2507,7 +2516,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                   {/* Раскрывающаяся панель логистики */}
                   {isExpanded && (
                     <tr className="bg-slate-50 border-b border-gray-200">
-                      <td colSpan={17} className="p-0">
+                      <td colSpan={19} className="p-0">
                         <ExpandedLogisticsPanel order={o} setData={setData} pushLog={pushLog} />
                       </td>
                     </tr>
@@ -2658,8 +2667,8 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
             {detailModal.hasUpd && !detailModal.noGlobalSmart && (
               <div className="bg-emerald-500/10 border border-emerald-500/20 p-3 rounded-lg text-sm text-emerald-300 flex items-center justify-between">
                 <span>✅ УПД №{detailModal.updNum} от {detailModal.updDate}</span>
-                {detailModal.updFile && (
-                  <button onClick={() => downloadBase64File(detailModal.updFile, `УПД_${detailModal.updNum || detailModal.internalPo}.pdf`)}
+                {detailModal.updFileId && (
+                  <button onClick={() => downloadFile(detailModal.updFileId, `УПД_${detailModal.updNum || detailModal.internalPo}.pdf`)}
                     className="px-3 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 rounded-lg text-xs font-medium transition-colors">⬇ Скачать</button>
                 )}
               </div>
@@ -2698,6 +2707,8 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                   <option value="NET 30">NET 30</option>
                 </select>
               </div>
+              <InputField label="Дата оплаты клиента" value={editForm.dateCustomerPaid} onChange={(v) => setEditForm({ ...editForm, dateCustomerPaid: v })} type="date" />
+              <InputField label="Дата оплаты поставщику" value={editForm.datePaidSupplier} onChange={(v) => setEditForm({ ...editForm, datePaidSupplier: v })} type="date" />
             </div>
 
             {/* Блок External PO */}
@@ -2803,50 +2814,36 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
               <div className="flex items-center justify-between">
                 <h4 className="text-sm font-semibold text-blue-300">📄 УПД (Универсальный передаточный документ)</h4>
                 {editForm.hasUpd && !editForm.noGlobalSmart && (
-                  <button onClick={() => setEditForm({ ...editForm, hasUpd: false, noGlobalSmart: false, updNum: "", updDate: "", updFile: null })}
-                    className="text-xs text-red-400 hover:text-red-300">✕ Удалить УПД</button>
-                )}
-              </div>
-              <div className="flex items-center gap-4 mb-2">
-                <label className="text-xs text-slate-300 cursor-pointer">
-                  <input type="checkbox" checked={editForm.noGlobalSmart || false}
-                    onChange={(e) => setEditForm({ ...editForm, noGlobalSmart: e.target.checked, ...(e.target.checked ? { hasUpd: true, updNum: "Без участия GS", updDate: "", updFile: null } : { hasUpd: false, updNum: "", updDate: "", updFile: null }) })}
-                    className="mr-2 accent-blue-500" />
-                  Без участия GS
-                </label>
-                {!editForm.noGlobalSmart && (
-                  <label className="text-xs text-slate-300 cursor-pointer">
-                    <input type="checkbox" checked={editForm.hasUpd && !editForm.noGlobalSmart}
-                      onChange={(e) => setEditForm({ ...editForm, hasUpd: e.target.checked })}
-                      className="mr-2" />
-                    УПД загружена
-                  </label>
+                  <button onClick={() => setEditForm({ ...editForm, hasUpd: false, updNum: "", updDate: "", updFileId: null, _newUpdFile: null })}
+                    className="text-xs text-red-400 hover:text-red-300 transition-colors">✕ Удалить УПД</button>
                 )}
               </div>
               {editForm.noGlobalSmart ? (
                 <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 text-blue-300 text-sm">
-                  🔹 Заказ отмечен как «Без участия Global Smart»
+                  🔹 Заказ без участия Global Smart
                 </div>
               ) : editForm.hasUpd ? (
-                <div className="grid grid-cols-2 gap-3">
-                  <InputField label="Номер УПД" value={editForm.updNum} onChange={(v) => setEditForm({ ...editForm, updNum: v })} />
-                  <InputField label="Дата УПД" value={editForm.updDate} onChange={(v) => setEditForm({ ...editForm, updDate: v })} type="date" />
-                  <div className="col-span-2">
-                    <label className="text-xs text-slate-400 mb-1 block">Файл УПД (скан)</label>
+                <div className="space-y-2">
+                  <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-lg p-3 text-emerald-300 text-sm space-y-1">
+                    <p>✅ УПД №{editForm.updNum} от {editForm.updDate}</p>
+                    {(editForm.updFileId || editForm._newUpdFile) && <p className="text-xs text-emerald-400/70">Файл прикреплён</p>}
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-400 mb-1 block">Заменить файл УПД</label>
                     <input type="file" accept=".pdf,.jpg,.jpeg,.png"
                       onChange={(e) => {
                         const file = e.target.files?.[0];
-                        if (file) {
-                          const reader = new FileReader();
-                          reader.onload = (ev) => setEditForm({ ...editForm, updFile: ev.target.result });
-                          reader.readAsDataURL(file);
-                        }
+                        if (file) setEditForm({ ...editForm, _newUpdFile: file });
                       }}
-                      className="w-full text-xs text-slate-300" />
-                    {editForm.updFile && <p className="text-xs text-emerald-400 mt-1">✓ Файл прикреплён</p>}
+                      className="w-full text-xs text-slate-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:text-xs file:font-medium file:bg-blue-500 file:text-white file:cursor-pointer hover:file:bg-blue-600" />
+                    {editForm._newUpdFile && <p className="text-xs text-amber-400 mt-1">📎 Новый файл: {editForm._newUpdFile.name}</p>}
                   </div>
                 </div>
-              ) : null}
+              ) : (
+                <div className="bg-slate-700/30 border border-slate-600/50 rounded-lg p-3 text-slate-400 text-sm">
+                  УПД не загружена. Для загрузки измените стадию заказа на «Завершён».
+                </div>
+              )}
             </div>
 
             <div className="flex justify-end gap-3 pt-2">
@@ -2881,6 +2878,8 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                 <option value="NET 30">NET 30</option>
               </select>
             </div>
+            <InputField label="Дата оплаты клиента" value={newPO.dateCustomerPaid} onChange={(v) => setNewPO({ ...newPO, dateCustomerPaid: v })} type="date" />
+            <InputField label="Дата оплаты поставщику" value={newPO.datePaidSupplier} onChange={(v) => setNewPO({ ...newPO, datePaidSupplier: v })} type="date" />
           </div>
 
           {/* Блок External PO */}
@@ -3042,48 +3041,52 @@ const Debts = ({ debts, setDebts, pushLog, finResults, setFinResults, openPo }) 
   const grouped = {};
   openD.forEach((d) => { if (!grouped[d.company]) grouped[d.company] = []; grouped[d.company].push(d); });
 
-  const closeDebt = () => {
+  const closeDebt = async () => {
     if (!closeModal || !closeForm.file || !closeForm.amount) return;
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const payDocData = e.target.result;
+    try {
+      const uploaded = await api.uploadFile(closeForm.file, "payments", closeModal.id);
       const payAmount = parseFloat(closeForm.amount) || 0;
       const isAuto = String(closeModal.id).startsWith("auto_");
 
       if (isAuto) {
-        // Авто-запись: обновляем оплату в Фин. результат — запись исчезнет из авто-дебиторки
         if (setFinResults && closeModal.finResultId) {
           pushLog({ type: "debt_close_auto", finResultId: closeModal.finResultId, prev: { paymentFact: 0 } });
           setFinResults((prev) => prev.map((fr) => {
             if (fr.id === closeModal.finResultId) {
-              return { ...fr, paymentFact: payAmount, paymentDoc: payDocData, paymentDate: closeForm.date };
+              return { ...fr, paymentFact: payAmount, paymentDocFileId: uploaded.id, paymentDate: closeForm.date };
             }
             return fr;
           }));
         }
       } else {
-        // Ручная запись: закрываем в debts и синхронизируем Фин. результат
-      pushLog({ type: "debt_close", id: closeModal.id, prev: { status: "open", payDoc: null, payDate: "", payComment: "" } });
-        setDebts((prev) => prev.map((d) => d.id === closeModal.id ? { ...d, status: "closed", payDoc: payDocData, payDate: closeForm.date, payComment: closeForm.comment } : d));
+        pushLog({ type: "debt_close", id: closeModal.id, prev: { status: "open", payDocFileId: null, payDate: "", payComment: "" } });
+        setDebts((prev) => prev.map((d) => d.id === closeModal.id ? { ...d, status: "closed", payDocFileId: uploaded.id, payDate: closeForm.date, payComment: closeForm.comment } : d));
 
         if (setFinResults && closeModal.order) {
           setFinResults((prev) => prev.map((fr) => {
             if (fr.customerPo === closeModal.order) {
-              return { ...fr, paymentFact: payAmount, paymentDoc: payDocData, paymentDate: closeForm.date };
+              return { ...fr, paymentFact: payAmount, paymentDocFileId: uploaded.id, paymentDate: closeForm.date };
             }
             return fr;
           }));
         }
       }
-
-      setCloseModal(null);
-      setCloseForm({ file: null, date: "", comment: "", amount: "" });
-    };
-    reader.readAsDataURL(closeForm.file);
+    } catch (err) {
+      console.error("Ошибка загрузки платёжного документа:", err);
+      return;
+    }
+    setCloseModal(null);
+    setCloseForm({ file: null, date: "", comment: "", amount: "" });
   };
 
-  const addDebt = () => {
-    setDebts((prev) => [...prev, { ...form, id: Date.now(), amount: parseFloat(form.amount) || 0, status: "open", payDoc: null, payDate: "", payComment: "" }]);
+  const addDebt = async () => {
+    try {
+      const saved = await api.createDebt({ ...form, amount: parseFloat(form.amount) || 0, status: "open" });
+      saved.amount = parseFloat(saved.amount) || 0;
+      setDebts((prev) => [...prev, saved]);
+    } catch (err) {
+      console.error("Ошибка создания долга:", err);
+    }
     setAddModal(false);
     setForm({ company: "", order: "", amount: 0, dueDate: "", currency: "RUB", upd: "" });
   };
@@ -3151,9 +3154,9 @@ const Debts = ({ debts, setDebts, pushLog, finResults, setFinResults, openPo }) 
                 <col className="w-[18%]" />
               </colgroup>
               <thead>
-                <tr className="bg-[#1E3A5F]/10 text-[#1E3A5F] text-left text-xs uppercase">
+                <tr className="bg-[#1E3A5F]/10 text-[#1E3A5F] text-center text-xs uppercase">
                   <th className="py-2 px-4 font-semibold">Заказ</th>
-                  <th className="py-2 px-3 text-right font-semibold">Сумма</th>
+                  <th className="py-2 px-3 font-semibold">Сумма</th>
                   <th className="py-2 px-3 font-semibold">Срок оплаты</th>
                   <th className="py-2 px-3 font-semibold">Статус срока</th>
                   <th className="py-2 px-3 font-semibold">Действия</th>
@@ -3174,15 +3177,15 @@ const Debts = ({ debts, setDebts, pushLog, finResults, setFinResults, openPo }) 
                     : <span className="text-gray-400">—</span>;
                   return (
                     <tr key={d.id} className={`border-b border-gray-200 transition-colors hover:bg-blue-50 ${overdue ? "bg-red-200" : idx % 2 === 1 ? "bg-gray-50" : ""}`}>
-                      <td className="py-2.5 px-4 text-[#1E3A5F] font-mono text-xs font-medium">{d.order}</td>
-                      <td className={`py-2.5 px-3 text-right font-mono text-xs font-bold ${overdue ? "text-rose-700" : "text-gray-900"}`}>${fmt(d.amount)}</td>
-                      <td className="py-2.5 px-3 text-xs">
+                      <td className="py-2.5 px-4 text-center text-[#1E3A5F] font-mono text-xs font-medium">{d.order}</td>
+                      <td className={`py-2.5 px-3 text-center font-mono text-xs font-bold ${overdue ? "text-rose-700" : "text-gray-900"}`}>${fmt(d.amount)}</td>
+                      <td className="py-2.5 px-3 text-center text-xs">
                         {d.dueDate ? (
                           <span className={overdue ? "text-rose-700 font-bold" : "text-gray-600"}>{d.dueDate}</span>
                         ) : <span className="text-gray-400">—</span>}
                       </td>
-                      <td className="py-2.5 px-3 text-xs">{daysLabel}</td>
-                      <td className="py-2.5 px-3">
+                      <td className="py-2.5 px-3 text-center text-xs">{daysLabel}</td>
+                      <td className="py-2.5 px-3 text-center">
                         <button onClick={() => { setCloseModal(d); setCloseForm({ file: null, date: "", comment: "", amount: String(d.amount || "") }); }} className="px-3 py-1.5 bg-emerald-100 hover:bg-emerald-200 text-emerald-700 rounded-lg text-xs font-medium border border-emerald-300 transition-colors">✅ Закрыть</button>
                       </td>
                     </tr>
@@ -3201,10 +3204,10 @@ const Debts = ({ debts, setDebts, pushLog, finResults, setFinResults, openPo }) 
           <div className="rounded-xl shadow-sm overflow-hidden border border-emerald-200">
             <table className="w-full text-sm">
               <thead>
-                <tr className="bg-emerald-50 text-emerald-800 text-left text-xs uppercase">
+                <tr className="bg-emerald-50 text-emerald-800 text-center text-xs uppercase">
                   <th className="py-2.5 px-4 font-semibold">Компания</th>
                   <th className="py-2.5 px-3 font-semibold">Заказ</th>
-                  <th className="py-2.5 px-3 text-right font-semibold">Сумма</th>
+                  <th className="py-2.5 px-3 font-semibold">Сумма</th>
                   <th className="py-2.5 px-3 font-semibold">Дата закрытия</th>
                   <th className="py-2.5 px-3 font-semibold">Документ</th>
                 </tr>
@@ -3212,15 +3215,15 @@ const Debts = ({ debts, setDebts, pushLog, finResults, setFinResults, openPo }) 
               <tbody className="bg-white">
                 {closedD.map((d, idx) => (
                   <tr key={d.id} className={`border-b border-gray-100 ${idx % 2 === 1 ? "bg-gray-50" : ""}`}>
-                    <td className="py-2 px-4 text-gray-700 font-medium text-xs">{d.company}</td>
-                    <td className="py-2 px-3 text-gray-500 text-xs">{d.order}</td>
-                    <td className="py-2 px-3 text-right text-emerald-600 font-mono text-xs line-through">{fmt(d.amount)} {d.currency}</td>
-                    <td className="py-2 px-3 text-gray-500 text-xs">{d.payDate || "—"}</td>
+                    <td className="py-2 px-4 text-center text-gray-700 font-medium text-xs">{d.company}</td>
+                    <td className="py-2 px-3 text-center text-gray-500 text-xs">{d.order}</td>
+                    <td className="py-2 px-3 text-center text-emerald-600 font-mono text-xs line-through">{fmt(d.amount)} {d.currency}</td>
+                    <td className="py-2 px-3 text-center text-gray-500 text-xs">{d.payDate || "—"}</td>
                     <td className="py-2 px-3">
-                      {d.payDoc ? (
+                      {d.payDocFileId ? (
                         <div className="flex items-center gap-1">
                           <button onClick={() => setViewDoc(d)} className="text-xs text-blue-600 hover:text-blue-800 font-medium">📎 Просмотр</button>
-                          <button onClick={() => downloadBase64File(d.payDoc, `Платёжка_${d.order}.pdf`)}
+                          <button onClick={() => downloadFile(d.payDocFileId, `Платёжка_${d.order}.pdf`)}
                             className="text-xs text-emerald-600 hover:text-emerald-800 font-medium" title="Скачать документ">⬇</button>
                         </div>
                       ) : <span className="text-gray-400 text-xs">—</span>}
@@ -3279,14 +3282,14 @@ const Debts = ({ debts, setDebts, pushLog, finResults, setFinResults, openPo }) 
     </Modal>
 
       <Modal isOpen={!!viewDoc} onClose={() => setViewDoc(null)} title="Платёжный документ" wide>
-        {viewDoc && viewDoc.payDoc && (
+        {viewDoc && viewDoc.payDocFileId && (
           <div>
             <div className="flex items-center justify-between mb-3">
               <p className="text-slate-400 text-sm">{viewDoc.company} — {viewDoc.order} — Закрыт: {viewDoc.payDate}</p>
-              <button onClick={() => downloadBase64File(viewDoc.payDoc, `Платёжка_${viewDoc.order}.pdf`)}
+              <button onClick={() => downloadFile(viewDoc.payDocFileId, `Платёжка_${viewDoc.order}.pdf`)}
                 className="px-4 py-1.5 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-xs font-medium transition-colors">⬇ Скачать документ</button>
             </div>
-            {viewDoc.payDoc.startsWith("data:image") ? <img src={viewDoc.payDoc} alt="Платёжка" className="max-w-full rounded-lg" /> : <a href={viewDoc.payDoc} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300">Открыть PDF</a>}
+            <a href={api.getFileUrl(viewDoc.payDocFileId)} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300">Открыть документ</a>
             {viewDoc.payComment && <p className="mt-3 text-slate-400 text-sm">Комментарий: {viewDoc.payComment}</p>}
           </div>
         )}
@@ -3296,64 +3299,295 @@ const Debts = ({ debts, setDebts, pushLog, finResults, setFinResults, openPo }) 
 };
 
 // ==================== ИНФРАСТРУКТУРЫ ====================
-const Infrastructure = ({ balances, setBalances, pushLog }) => {
+const Infrastructure = ({ balances, setBalances, pushLog, infraData, setInfraData, pendingTransfers, setPendingTransfers }) => {
   const [selectedAcc, setSelectedAcc] = useState(null);
   const [showPayment, setShowPayment] = useState(false);
   const [payment, setPayment] = useState({ from: "", to: "", amount: 0, desc: "", date: new Date().toISOString().split("T")[0] });
   const [editingComment, setEditingComment] = useState(null);
   const [editCommentVal, setEditCommentVal] = useState("");
-  const [pendingTransfers, setPendingTransfers] = useState([]);
   const [confirmTransfer, setConfirmTransfer] = useState(null);
   const [confirmFile, setConfirmFile] = useState(null);
+  const [confirmFees, setConfirmFees] = useState({ sendFee: 0, receiveFee: 0 });
+  const [exchangeRate, setExchangeRate] = useState(null);
+  const [rateLoading, setRateLoading] = useState(false);
+
+  const currencyToISO = (c) => ({ BAT: "THB" }[c?.toUpperCase()] || c?.toUpperCase());
+
+  useEffect(() => {
+    if (!payment.from || !payment.to) { setExchangeRate(null); return; }
+    const fromAcc = balances.find((b) => b.name === payment.from);
+    const toAcc = balances.find((b) => b.name === payment.to);
+    if (!fromAcc || !toAcc) { setExchangeRate(null); return; }
+    const fromISO = currencyToISO(fromAcc.currency);
+    const toISO = currencyToISO(toAcc.currency);
+    if (fromISO === toISO) { setExchangeRate(null); return; }
+    setRateLoading(true);
+    api.fetchExchangeRate(fromISO, toISO)
+      .then((data) => setExchangeRate({ rate: data.rate, from: fromAcc.currency, to: toAcc.currency, fromISO, toISO }))
+      .catch(() => setExchangeRate(null))
+      .finally(() => setRateLoading(false));
+  }, [payment.from, payment.to, balances]);
 
   const startEditComment = (op) => { setEditingComment(op.id); setEditCommentVal(op.comment || ""); };
   const saveComment = (opId) => {
-    const ops = INFRA_DATA[selectedAcc];
-    if (ops) { const op = ops.find((o) => o.id === opId); if (op) op.comment = editCommentVal; }
+    api.updateInfraComment(opId, editCommentVal).catch((e) => console.error("Ошибка сохранения комментария:", e));
     setEditingComment(null);
   };
 
-  const processPayment = () => {
+  const isInternalTransfer = (fromName, toName) => {
+    const fa = balances.find((b) => b.name === fromName);
+    const ta = balances.find((b) => b.name === toName);
+    return fa && ta && fa.group && ta.group && fa.group.toUpperCase() === ta.group.toUpperCase();
+  };
+
+  const processPayment = async () => {
     const amt = parseFloat(payment.amount) || 0;
     if (!payment.from || !amt) return;
     const fromAcc = balances.find((b) => b.name === payment.from);
+    const toAcc = balances.find((b) => b.name === payment.to);
+    const internal = payment.to && isInternalTransfer(payment.from, payment.to);
+    const convertedAmt = exchangeRate ? Math.round(amt * exchangeRate.rate * 100) / 100 : amt;
+    const receivedAmt = internal && exchangeRate ? convertedAmt : (exchangeRate ? convertedAmt : amt);
+
     pushLog({ type: "infra_payment", accName: payment.from, prev: fromAcc?.balance || 0 });
     setBalances((prev) => prev.map((b) => b.name === payment.from ? { ...b, balance: b.balance - amt } : b));
-    if (payment.to) {
-      setPendingTransfers((prev) => [...prev, {
-        id: Date.now(), from: payment.from, to: payment.to, amount: amt, currency: fromAcc?.currency || "USD",
-        desc: payment.desc, date: payment.date, createdAt: new Date().toISOString(),
-      }]);
+
+    if (payment.to && internal) {
+      pushLog({ type: "infra_payment", accName: payment.to, prev: toAcc?.balance || 0 });
+      setBalances((prev) => prev.map((b) => b.name === payment.to ? { ...b, balance: b.balance + receivedAmt } : b));
+
+      const completedDate = payment.date || new Date().toISOString().split("T")[0];
+      const transferData = {
+        fromAcc: payment.from, toAcc: payment.to, amount: amt,
+        currency: fromAcc?.currency || "USD", description: payment.desc,
+        date: completedDate, status: "completed", completedAt: new Date().toISOString(),
+      };
+      if (exchangeRate && toAcc) {
+        transferData.toCurrency = toAcc.currency;
+        transferData.exchangeRate = exchangeRate.rate;
+        transferData.convertedAmount = convertedAmt;
+      }
+      try {
+        const saved = await api.createTransfer(transferData);
+        saved.amount = parseFloat(saved.amount) || 0;
+        saved.convertedAmount = parseFloat(saved.convertedAmount) || 0;
+        saved.exchangeRate = parseFloat(saved.exchangeRate) || 0;
+        const mappedTransfer = { ...saved, from: saved.fromAcc, to: saved.toAcc, desc: saved.description };
+        setPendingTransfers((prev) => [...prev, mappedTransfer]);
+
+        const poRef = extractPoRef(payment.desc);
+        const transferDesc = poRef ? payment.desc : `TRANSFER FROM ${payment.from.toUpperCase()} TO ${payment.to.toUpperCase()}`;
+        const rateNote = exchangeRate ? ` (${fromAcc.currency}→${toAcc.currency} @${exchangeRate.rate.toFixed(4)})` : "";
+        const currentFromBal = (fromAcc?.balance || 0) - amt;
+        const currentToBal = (toAcc?.balance || 0) + receivedAmt;
+
+        const parseOp = (op) => { op.received = parseFloat(op.received) || 0; op.outgoing = parseFloat(op.outgoing) || 0; op.bankFees = parseFloat(op.bankFees) || 0; op.balance = parseFloat(op.balance) || 0; return op; };
+        try {
+          const outOp = parseOp(await api.createInfraOp({
+            accountName: payment.from, poRef: poRef || "", description: transferDesc + rateNote,
+            received: 0, outgoing: amt, bankFees: 0, supplier: "", invoice: "", date: completedDate, balance: currentFromBal, transferId: saved.id,
+          }));
+          setInfraData((prev) => ({ ...prev, [payment.from]: [...(prev[payment.from] || []), outOp] }));
+        } catch (err) { console.error("Ошибка создания операции (откуда):", err); }
+        try {
+          const inOp = parseOp(await api.createInfraOp({
+            accountName: payment.to, poRef: poRef || "", description: transferDesc + rateNote,
+            received: receivedAmt, outgoing: 0, bankFees: 0, supplier: "", invoice: "", date: completedDate, balance: currentToBal, transferId: saved.id,
+          }));
+          setInfraData((prev) => ({ ...prev, [payment.to]: [...(prev[payment.to] || []), inOp] }));
+        } catch (err) { console.error("Ошибка создания операции (куда):", err); }
+      } catch (err) {
+        console.error("Ошибка создания внутреннего перевода:", err);
+      }
+
+    } else if (payment.to) {
+      const transferData = {
+        fromAcc: payment.from, toAcc: payment.to, amount: amt,
+        currency: fromAcc?.currency || "USD", description: payment.desc,
+        date: payment.date, status: "pending",
+      };
+      if (exchangeRate && toAcc) {
+        transferData.toCurrency = toAcc.currency;
+        transferData.exchangeRate = exchangeRate.rate;
+        transferData.convertedAmount = convertedAmt;
+      }
+      try {
+        const saved = await api.createTransfer(transferData);
+        saved.amount = parseFloat(saved.amount) || 0;
+        saved.convertedAmount = parseFloat(saved.convertedAmount) || 0;
+        saved.exchangeRate = parseFloat(saved.exchangeRate) || 0;
+        setPendingTransfers((prev) => [...prev, { ...saved, from: saved.fromAcc, to: saved.toAcc, desc: saved.description }]);
+      } catch (err) {
+        console.error("Ошибка создания перевода:", err);
+      }
     }
     setShowPayment(false);
+    setExchangeRate(null);
     setPayment({ from: "", to: "", amount: 0, desc: "", date: new Date().toISOString().split("T")[0] });
   };
 
-  const handleConfirmTransfer = () => {
+  const extractPoRef = (desc, fromAcc, toAcc) => {
+    if (!desc) return null;
+    const poMatch = desc.match(/[A-Z]{1,3}\d{2}-\d{3,5}/i);
+    return poMatch ? poMatch[0].toUpperCase() : null;
+  };
+
+  const handleConfirmTransfer = async () => {
     if (!confirmTransfer || !confirmFile) return;
     const t = confirmTransfer;
+    const sendFee = parseFloat(confirmFees.sendFee) || 0;
+    const receiveFee = parseFloat(confirmFees.receiveFee) || 0;
+    const isCrossCurrency = t.convertedAmount && t.convertedAmount > 0 && t.toCurrency;
+    const receivedAmount = isCrossCurrency ? t.convertedAmount : t.amount;
+    const netReceived = receivedAmount - receiveFee;
+
     pushLog({ type: "infra_payment", accName: t.to, prev: balances.find((b) => b.name === t.to)?.balance || 0 });
-    setBalances((prev) => prev.map((b) => b.name === t.to ? { ...b, balance: b.balance + t.amount } : b));
-    setPendingTransfers((prev) => prev.map((p) => p.id === t.id
-      ? { ...p, status: "completed", completedAt: new Date().toISOString(), fileName: confirmFile.name, fileData: confirmFile.data }
-      : p
-    ));
+    setBalances((prev) => prev.map((b) => b.name === t.to ? { ...b, balance: b.balance + netReceived } : b));
+
+    if (sendFee > 0) {
+      pushLog({ type: "infra_payment", accName: t.from, prev: balances.find((b) => b.name === t.from)?.balance || 0 });
+      setBalances((prev) => prev.map((b) => b.name === t.from ? { ...b, balance: b.balance - sendFee } : b));
+    }
+
+    let fileId = null;
+    if (confirmFile.file) {
+      try {
+        const uploaded = await api.uploadFile(confirmFile.file, "statements", t.id);
+        fileId = uploaded.id;
+      } catch (err) {
+        console.error("Ошибка загрузки выписки:", err);
+      }
+    }
+
+    const poRef = extractPoRef(t.desc, t.from, t.to);
+    const transferDesc = poRef ? t.desc : `TRANSFER FROM ${(t.from || "").toUpperCase()} TO ${(t.to || "").toUpperCase()}`;
+    const completedDate = new Date().toISOString().split("T")[0];
+
+    const currentFromBalance = balances.find((b) => b.name === t.from)?.balance || 0;
+    const newFromBalance = currentFromBalance - sendFee;
+    const currentToBalance = balances.find((b) => b.name === t.to)?.balance || 0;
+    const newToBalance = currentToBalance + netReceived;
+
+    const rateNote = isCrossCurrency ? ` (${t.currency}→${t.toCurrency} @${t.exchangeRate})` : "";
+
+    const parseOp = (op) => {
+      op.received = parseFloat(op.received) || 0;
+      op.outgoing = parseFloat(op.outgoing) || 0;
+      op.bankFees = parseFloat(op.bankFees) || 0;
+      op.balance = parseFloat(op.balance) || 0;
+      return op;
+    };
+
+    try {
+      const outOp = parseOp(await api.createInfraOp({
+        accountName: t.from,
+        poRef: poRef || "",
+        description: transferDesc + rateNote,
+        received: 0,
+        outgoing: t.amount,
+        bankFees: sendFee,
+        supplier: "",
+        invoice: "",
+        date: t.date || completedDate,
+        balance: newFromBalance,
+        transferId: t.id,
+      }));
+      setInfraData((prev) => ({ ...prev, [t.from]: [...(prev[t.from] || []), outOp] }));
+    } catch (err) {
+      console.error("Ошибка создания операции (откуда):", err);
+    }
+
+    try {
+      const inOp = parseOp(await api.createInfraOp({
+        accountName: t.to,
+        poRef: poRef || "",
+        description: transferDesc + rateNote,
+        received: netReceived,
+        outgoing: 0,
+        bankFees: receiveFee,
+        supplier: "",
+        invoice: "",
+        date: completedDate,
+        balance: newToBalance,
+        transferId: t.id,
+      }));
+      setInfraData((prev) => ({ ...prev, [t.to]: [...(prev[t.to] || []), inOp] }));
+    } catch (err) {
+      console.error("Ошибка создания операции (куда):", err);
+    }
+
+    const updates = { status: "completed", completedAt: new Date().toISOString(), fileName: confirmFile.name, fileId };
+    api.updateTransfer(t.id, updates).catch((e) => console.error("Ошибка обновления перевода:", e));
+    setPendingTransfers((prev) => prev.map((p) => p.id === t.id ? { ...p, ...updates } : p));
     setConfirmTransfer(null);
     setConfirmFile(null);
+    setConfirmFees({ sendFee: 0, receiveFee: 0 });
   };
 
-  const cancelPending = (t) => {
-    pushLog({ type: "infra_payment", accName: t.from, prev: balances.find((b) => b.name === t.from)?.balance || 0 });
+  const [cancelConfirm, setCancelConfirm] = useState(null);
+
+  const cancelTransfer = async (t) => {
+    const isDone = t.status === "completed";
+    const expectedDesc = `TRANSFER FROM ${(t.from || "").toUpperCase()} TO ${(t.to || "").toUpperCase()}`;
+    const poRef = t.desc ? t.desc.match(/[A-Z]{1,3}\d{2}-\d{3,5}/i)?.[0]?.toUpperCase() : null;
+
+    const isRelatedOp = (op) =>
+      op.transferId === t.id ||
+      (op.description && op.description.toUpperCase() === expectedDesc) ||
+      (poRef && op.description && op.description.toUpperCase() === t.desc.toUpperCase());
+
     setBalances((prev) => prev.map((b) => b.name === t.from ? { ...b, balance: b.balance + t.amount } : b));
-    setPendingTransfers((prev) => prev.map((p) => p.id === t.id ? { ...p, status: "cancelled" } : p));
+
+    if (isDone) {
+      const relatedOps = [];
+      for (const [accName, ops] of Object.entries(infraData)) {
+        for (const op of ops) {
+          if (isRelatedOp(op)) relatedOps.push({ accName, opId: op.id, received: op.received, outgoing: op.outgoing, bankFees: op.bankFees });
+        }
+      }
+      for (const op of relatedOps) {
+        if (op.received > 0) {
+          setBalances((prev) => prev.map((b) => b.name === op.accName ? { ...b, balance: b.balance - op.received } : b));
+        }
+        if (op.bankFees > 0) {
+          setBalances((prev) => prev.map((b) => b.name === op.accName ? { ...b, balance: b.balance + op.bankFees } : b));
+        }
+      }
+
+      try {
+        await api.deleteInfraByTransfer(t.id, expectedDesc);
+      } catch (err) {
+        console.error("Ошибка удаления операций:", err);
+      }
+      setInfraData((prev) => {
+        const next = { ...prev };
+        for (const accName of Object.keys(next)) {
+          next[accName] = next[accName].filter((op) => !isRelatedOp(op));
+        }
+        return next;
+      });
+    }
+
+    try {
+      await api.deleteTransfer(t.id);
+    } catch (err) {
+      console.error("Ошибка удаления перевода:", err);
+    }
+    setPendingTransfers((prev) => prev.filter((p) => p.id !== t.id));
+    setCancelConfirm(null);
   };
 
-  const pendingCount = pendingTransfers.filter((t) => !t.status).length;
+  const [transferTab, setTransferTab] = useState("pending");
+  const pendingCount = pendingTransfers.filter((t) => t.status === "pending" || !t.status).length;
   const completedCount = pendingTransfers.filter((t) => t.status === "completed").length;
+  const cancelledCount = pendingTransfers.filter((t) => t.status === "cancelled").length;
+  const filteredTransfers = [...pendingTransfers]
+    .filter((t) => transferTab === "pending" ? (t.status === "pending" || !t.status) : t.status === "completed")
+    .reverse();
 
   const safes = balances.filter((b) => b.name.includes("Сейф") || b.name.includes("Crypto"));
   const accounts = balances.filter((b) => !b.name.includes("Сейф") && !b.name.includes("Crypto"));
-  const accOps = selectedAcc ? [...(INFRA_DATA[selectedAcc] || [])].reverse() : [];
+  const accOps = selectedAcc ? [...(infraData[selectedAcc] || [])].reverse() : [];
 
   const totalUSD = balances.filter((b) => b.currency === "USD").reduce((s, b) => s + b.balance, 0);
   const totalAccounts = accounts.length;
@@ -3444,34 +3678,49 @@ const Infrastructure = ({ balances, setBalances, pushLog }) => {
       {pendingTransfers.length > 0 && (
         <div className="rounded-xl shadow-lg overflow-hidden border border-[#1E3A5F]/30">
           <div className="bg-[#1E3A5F] px-5 py-3 flex items-center justify-between">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-3">
               <h3 className="text-white font-semibold text-sm">Журнал переводов</h3>
-              {pendingCount > 0 && <span className="bg-amber-500 text-white text-xs font-bold px-2 py-0.5 rounded-full">{pendingCount} в пути</span>}
-              {completedCount > 0 && <span className="bg-emerald-500 text-white text-xs font-bold px-2 py-0.5 rounded-full">{completedCount} исполнено</span>}
+              <div className="flex rounded-lg overflow-hidden border border-white/20">
+                <button onClick={() => setTransferTab("pending")}
+                  className={`px-3 py-1 text-xs font-medium transition-colors ${transferTab === "pending" ? "bg-amber-500 text-white" : "bg-transparent text-white/60 hover:text-white"}`}>
+                  В пути {pendingCount > 0 && `(${pendingCount})`}
+                </button>
+                <button onClick={() => setTransferTab("completed")}
+                  className={`px-3 py-1 text-xs font-medium transition-colors ${transferTab === "completed" ? "bg-emerald-500 text-white" : "bg-transparent text-white/60 hover:text-white"}`}>
+                  Выполненные {completedCount > 0 && `(${completedCount})`}
+                </button>
+              </div>
             </div>
           </div>
           <div className="bg-white p-4 space-y-3">
-            {[...pendingTransfers].reverse().map((t) => {
+            {filteredTransfers.length === 0 && (
+              <div className="text-center text-gray-400 text-sm py-6">
+                {transferTab === "pending" ? "Нет переводов в пути" : "Нет выполненных переводов"}
+              </div>
+            )}
+            {filteredTransfers.map((t) => {
               const isDone = t.status === "completed";
-              const isCancelled = t.status === "cancelled";
               return (
                 <div key={t.id} className={`rounded-xl border p-4 flex items-center justify-between gap-4 flex-wrap transition-colors ${
-                  isDone ? "bg-emerald-50 border-emerald-300" : isCancelled ? "bg-gray-50 border-gray-200 opacity-60" : "bg-amber-50 border-amber-300"
+                  isDone ? "bg-emerald-50 border-emerald-300" : "bg-amber-50 border-amber-300"
                 }`}>
                   <div className="flex items-center gap-3 flex-1 min-w-[280px]">
                     <div className="text-right">
                       <div className="text-xs text-gray-400 mb-0.5">Откуда</div>
-                      <div className={`text-sm font-semibold ${isCancelled ? "text-gray-400 line-through" : "text-rose-600"}`}>{t.from}</div>
+                      <div className="text-sm font-semibold text-rose-600">{t.from}</div>
                     </div>
-                    <div className={`text-xl ${isDone ? "text-emerald-500" : isCancelled ? "text-gray-300" : "text-amber-500"}`}>→</div>
+                    <div className={`text-xl ${isDone ? "text-emerald-500" : "text-amber-500"}`}>→</div>
                     <div>
                       <div className="text-xs text-gray-400 mb-0.5">Куда</div>
-                      <div className={`text-sm font-semibold ${isCancelled ? "text-gray-400 line-through" : "text-emerald-600"}`}>{t.to}</div>
+                      <div className="text-sm font-semibold text-emerald-600">{t.to}</div>
                     </div>
                   </div>
                   <div className="text-center">
                     <div className="text-xs text-gray-400 mb-0.5">Сумма</div>
-                    <div className={`text-lg font-bold tabular-nums ${isCancelled ? "text-gray-400 line-through" : "text-[#1E3A5F]"}`}>{fmt(t.amount, t.currency)}</div>
+                    <div className="text-lg font-bold tabular-nums text-[#1E3A5F]">{fmt(t.amount, t.currency)}</div>
+                    {t.convertedAmount > 0 && t.toCurrency && (
+                      <div className="text-xs text-cyan-600 font-medium">= {fmt(t.convertedAmount, t.toCurrency)}</div>
+                    )}
                   </div>
                   <div className="text-center">
                     <div className="text-xs text-gray-400 mb-0.5">Дата отправки</div>
@@ -3483,29 +3732,42 @@ const Infrastructure = ({ balances, setBalances, pushLog }) => {
                         <div className="text-xs font-semibold text-emerald-600 mb-0.5">✓ Исполнен</div>
                         <div className="text-[10px] text-gray-400">{new Date(t.completedAt).toLocaleDateString("ru-RU")}</div>
                         {t.fileName && (
-                          <button onClick={() => downloadBase64File(t.fileData, t.fileName)}
+                          <button onClick={() => downloadFile(t.fileId || t.fileData, t.fileName)}
                             className="text-[10px] text-blue-500 hover:text-blue-700 font-medium truncate max-w-[120px]" title={`Скачать: ${t.fileName}`}>
                             📎 {t.fileName} ⬇
                           </button>
                         )}
                       </>
                     )}
-                    {isCancelled && <div className="text-xs font-semibold text-gray-400">✕ Отменён</div>}
-                    {!t.status && <div className="text-xs font-semibold text-amber-600">⏳ В пути</div>}
+                    {(t.status === "pending" || !t.status) && <div className="text-xs font-semibold text-amber-600">⏳ В пути</div>}
                   </div>
                   {t.desc && <div className="text-xs text-gray-500 basis-full">{t.desc}</div>}
-                  {!t.status && (
-                    <div className="flex gap-2 basis-full justify-end">
-                      <button onClick={() => { setConfirmTransfer(t); setConfirmFile(null); }}
+                  <div className="flex gap-2 basis-full justify-end">
+                    {(t.status === "pending" || !t.status) && (
+                      <button onClick={() => { setConfirmTransfer(t); setConfirmFile(null); setConfirmFees({ sendFee: 0, receiveFee: 0 }); }}
                         className="px-4 py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg text-xs font-medium transition-colors">
                         Подтвердить получение
                       </button>
-                      <button onClick={() => cancelPending(t)}
-                        className="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg text-xs font-medium transition-colors">
+                    )}
+                    {cancelConfirm === t.id ? (
+                      <div className="flex items-center gap-2 bg-rose-50 border border-rose-200 rounded-lg px-3 py-1.5">
+                        <span className="text-xs text-rose-700">Отменить перевод{isDone ? " и откатить операции" : ""}?</span>
+                        <button onClick={() => cancelTransfer(t)}
+                          className="px-3 py-1 bg-rose-500 hover:bg-rose-600 text-white rounded text-xs font-medium transition-colors">
+                          Да
+                        </button>
+                        <button onClick={() => setCancelConfirm(null)}
+                          className="px-3 py-1 bg-gray-200 hover:bg-gray-300 text-gray-600 rounded text-xs font-medium transition-colors">
+                          Нет
+                        </button>
+                      </div>
+                    ) : (
+                      <button onClick={() => setCancelConfirm(t.id)}
+                        className="px-3 py-2 bg-gray-100 hover:bg-rose-50 text-gray-500 hover:text-rose-600 rounded-lg text-xs font-medium transition-colors">
                         Отменить
                       </button>
-                    </div>
-                  )}
+                    )}
+                  </div>
                 </div>
               );
             })}
@@ -3514,11 +3776,11 @@ const Infrastructure = ({ balances, setBalances, pushLog }) => {
       )}
 
       {/* Модалка подтверждения перевода */}
-      <Modal isOpen={!!confirmTransfer} onClose={() => { setConfirmTransfer(null); setConfirmFile(null); }} title="Подтверждение получения перевода">
+      <Modal isOpen={!!confirmTransfer} onClose={() => { setConfirmTransfer(null); setConfirmFile(null); setConfirmFees({ sendFee: 0, receiveFee: 0 }); }} title="Подтверждение получения перевода">
         {confirmTransfer && (
           <div className="space-y-4">
             <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 text-blue-300 text-sm">
-              Для зачисления средств на счёт получателя необходимо приложить банковскую выписку (PDF, JPG, PNG)
+              Для зачисления средств приложите банковскую выписку. Укажите комиссии банка (если есть).
             </div>
             <div className="bg-slate-700/50 rounded-lg p-4 space-y-2">
               <div className="flex justify-between text-sm">
@@ -3530,9 +3792,21 @@ const Infrastructure = ({ balances, setBalances, pushLog }) => {
                 <span className="text-emerald-400 font-medium">{confirmTransfer.to}</span>
               </div>
               <div className="flex justify-between text-sm">
-                <span className="text-slate-400">Сумма:</span>
+                <span className="text-slate-400">Сумма перевода:</span>
                 <span className="text-white font-bold">{fmt(confirmTransfer.amount, confirmTransfer.currency)}</span>
               </div>
+              {confirmTransfer.convertedAmount > 0 && confirmTransfer.toCurrency && (
+                <>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-slate-400">Курс:</span>
+                    <span className="text-cyan-300 font-medium">1 {confirmTransfer.currency} = {confirmTransfer.exchangeRate} {confirmTransfer.toCurrency}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-slate-400">К зачислению:</span>
+                    <span className="text-emerald-400 font-bold">{fmt(confirmTransfer.convertedAmount, confirmTransfer.toCurrency)}</span>
+                  </div>
+                </>
+              )}
               <div className="flex justify-between text-sm">
                 <span className="text-slate-400">Дата отправки:</span>
                 <span className="text-white">{confirmTransfer.date}</span>
@@ -3544,6 +3818,38 @@ const Infrastructure = ({ balances, setBalances, pushLog }) => {
                 </div>
               )}
             </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-slate-400 mb-1 block">Комиссия отправки ({confirmTransfer.from})</label>
+                <input type="number" min="0" step="0.01" value={confirmFees.sendFee || ""}
+                  onChange={(e) => setConfirmFees((p) => ({ ...p, sendFee: e.target.value }))}
+                  placeholder="0.00"
+                  className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+              </div>
+              <div>
+                <label className="text-xs text-slate-400 mb-1 block">Комиссия получения ({confirmTransfer.to})</label>
+                <input type="number" min="0" step="0.01" value={confirmFees.receiveFee || ""}
+                  onChange={(e) => setConfirmFees((p) => ({ ...p, receiveFee: e.target.value }))}
+                  placeholder="0.00"
+                  className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+              </div>
+            </div>
+            {(parseFloat(confirmFees.sendFee) > 0 || parseFloat(confirmFees.receiveFee) > 0) && (
+              <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-amber-300 text-xs space-y-1">
+                {parseFloat(confirmFees.sendFee) > 0 && (
+                  <div>Комиссия отправки: {fmt(parseFloat(confirmFees.sendFee))} — спишется с {confirmTransfer.from}</div>
+                )}
+                {parseFloat(confirmFees.receiveFee) > 0 && (
+                  <div>Комиссия получения: {fmt(parseFloat(confirmFees.receiveFee))} — удержится из суммы на {confirmTransfer.to}</div>
+                )}
+                <div className="font-medium pt-1 border-t border-amber-500/20">
+                  Зачислится на {confirmTransfer.to}: {fmt(
+                    (confirmTransfer.convertedAmount > 0 ? confirmTransfer.convertedAmount : confirmTransfer.amount) - (parseFloat(confirmFees.receiveFee) || 0),
+                    confirmTransfer.toCurrency || confirmTransfer.currency
+                  )}
+                </div>
+              </div>
+            )}
             <div>
               <label className="text-xs text-slate-400 mb-2 block">Банковская выписка (обязательно)</label>
               <label className={`flex items-center justify-center gap-2 py-4 border-2 border-dashed rounded-xl cursor-pointer transition-colors ${
@@ -3551,7 +3857,7 @@ const Infrastructure = ({ balances, setBalances, pushLog }) => {
               }`}>
                 <input type="file" accept=".pdf,.jpg,.jpeg,.png" className="hidden" onChange={(e) => {
                   const f = e.target.files?.[0];
-                  if (f) { const reader = new FileReader(); reader.onload = (ev) => setConfirmFile({ name: f.name, data: ev.target.result }); reader.readAsDataURL(f); }
+                  if (f) { setConfirmFile({ name: f.name, file: f }); }
                 }} />
                 {confirmFile
                   ? <span className="text-emerald-400 text-sm font-medium">✓ {confirmFile.name}</span>
@@ -3559,7 +3865,7 @@ const Infrastructure = ({ balances, setBalances, pushLog }) => {
               </label>
             </div>
             <div className="flex justify-end gap-3 pt-2">
-              <button onClick={() => { setConfirmTransfer(null); setConfirmFile(null); }} className="px-4 py-2 text-slate-400 hover:text-white text-sm">Отмена</button>
+              <button onClick={() => { setConfirmTransfer(null); setConfirmFile(null); setConfirmFees({ sendFee: 0, receiveFee: 0 }); }} className="px-4 py-2 text-slate-400 hover:text-white text-sm">Отмена</button>
               <button onClick={handleConfirmTransfer} disabled={!confirmFile}
                 className={`px-6 py-2 rounded-lg text-sm font-medium transition-colors ${
                   confirmFile ? "bg-emerald-500 hover:bg-emerald-600 text-white" : "bg-slate-700 text-slate-500 cursor-not-allowed"
@@ -3582,35 +3888,35 @@ const Infrastructure = ({ balances, setBalances, pushLog }) => {
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="bg-[#1E3A5F]/10 text-[#1E3A5F] text-left text-xs uppercase">
+                  <tr className="bg-[#1E3A5F]/10 text-[#1E3A5F] text-center text-xs uppercase">
                     <th className="py-2.5 px-3 font-semibold">PO / Описание</th>
-                    <th className="py-2.5 px-3 text-right font-semibold">Приход</th>
-                    <th className="py-2.5 px-3 text-right font-semibold">Расход</th>
-                    <th className="py-2.5 px-3 text-right font-semibold">Комиссии</th>
+                    <th className="py-2.5 px-3 font-semibold">Приход</th>
+                    <th className="py-2.5 px-3 font-semibold">Расход</th>
+                    <th className="py-2.5 px-3 font-semibold">Комиссии</th>
                     <th className="py-2.5 px-3 font-semibold">Поставщик</th>
                     <th className="py-2.5 px-3 font-semibold">Инвойс</th>
                     <th className="py-2.5 px-3 font-semibold">Дата</th>
-                    <th className="py-2.5 px-3 text-right font-semibold">Остаток</th>
+                    <th className="py-2.5 px-3 font-semibold">Остаток</th>
                     <th className="py-2.5 px-3 font-semibold">Комментарий</th>
                   </tr>
                 </thead>
                 <tbody className="bg-white">
                   {accOps.map((op, idx) => (
                     <tr key={op.id} className={`border-b border-gray-200 hover:bg-blue-50 transition-colors ${idx % 2 === 1 ? "bg-gray-50" : ""}`}>
-                      <td className="py-2 px-3 text-gray-800 font-mono text-xs max-w-[180px]">
+                      <td className="py-2 px-3 text-center text-gray-800 font-mono text-xs max-w-[180px]">
                         {op.poRef
                           ? <span className="whitespace-pre-line">{op.poRef}</span>
                           : op.description
                             ? <span className="text-blue-600 italic text-xs">{op.description}</span>
                             : <span className="text-gray-400">—</span>}
                       </td>
-                      <td className="py-2 px-3 text-right text-emerald-600 font-semibold tabular-nums text-xs">{op.received ? "+" + fmt(op.received) : ""}</td>
-                      <td className="py-2 px-3 text-right text-rose-600 font-semibold tabular-nums text-xs">{op.outgoing ? "-" + fmt(op.outgoing) : ""}</td>
-                      <td className="py-2 px-3 text-right text-amber-600 text-xs tabular-nums">{op.bankFees ? fmt(op.bankFees) : ""}</td>
-                      <td className="py-2 px-3 text-gray-700 text-xs max-w-[150px] whitespace-pre-line">{op.supplier || "—"}</td>
-                      <td className="py-2 px-3 text-gray-500 font-mono text-xs">{op.invoice || "—"}</td>
-                      <td className="py-2 px-3 text-gray-500 text-xs whitespace-nowrap">{op.date || "—"}</td>
-                      <td className={`py-2 px-3 text-right font-semibold tabular-nums text-xs ${op.balance < 0 ? "text-rose-600" : "text-gray-900"}`}>
+                      <td className="py-2 px-3 text-center text-emerald-600 font-semibold tabular-nums text-xs">{op.received ? "+" + fmt(op.received) : ""}</td>
+                      <td className="py-2 px-3 text-center text-rose-600 font-semibold tabular-nums text-xs">{op.outgoing ? "-" + fmt(op.outgoing) : ""}</td>
+                      <td className="py-2 px-3 text-center text-amber-600 text-xs tabular-nums">{op.bankFees ? fmt(op.bankFees) : ""}</td>
+                      <td className="py-2 px-3 text-center text-gray-700 text-xs max-w-[150px] whitespace-pre-line">{op.supplier || "—"}</td>
+                      <td className="py-2 px-3 text-center text-gray-500 font-mono text-xs">{op.invoice || "—"}</td>
+                      <td className="py-2 px-3 text-center text-gray-500 text-xs whitespace-nowrap">{op.date || "—"}</td>
+                      <td className={`py-2 px-3 text-center font-semibold tabular-nums text-xs ${op.balance < 0 ? "text-rose-600" : "text-gray-900"}`}>
                         {op.balance !== 0 ? fmt(op.balance) : "—"}
                       </td>
                       <td className="py-2 px-3 text-xs max-w-[220px]">
@@ -3642,9 +3948,16 @@ const Infrastructure = ({ balances, setBalances, pushLog }) => {
 
       <Modal isOpen={showPayment} onClose={() => setShowPayment(false)} title="Провести перевод">
         <div className="space-y-4">
-          <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 text-blue-300 text-sm">
-            Деньги спишутся со счёта-источника сразу. Зачисление на счёт получателя — после подтверждения с банковской выпиской.
-          </div>
+          {(() => {
+            const internal = payment.from && payment.to && isInternalTransfer(payment.from, payment.to);
+            return (
+              <div className={`border rounded-lg p-3 text-sm ${internal ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-300" : "bg-blue-500/10 border-blue-500/20 text-blue-300"}`}>
+                {internal
+                  ? "Внутренний перевод — зачисление мгновенное, платёжка не требуется."
+                  : "Внешний перевод — деньги спишутся сразу, зачисление после подтверждения с банковской выпиской."}
+              </div>
+            );
+          })()}
           <div>
             <label className="text-xs text-slate-400 mb-1 block">Счёт списания (откуда)</label>
             <select value={payment.from} onChange={(e) => setPayment({ ...payment, from: e.target.value })} className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white">
@@ -3660,13 +3973,26 @@ const Infrastructure = ({ balances, setBalances, pushLog }) => {
             </select>
           </div>
           {payment.from && payment.to && (
-            <div className="bg-slate-700/30 rounded-lg p-3 flex items-center justify-center gap-3 text-sm">
-              <span className="text-rose-400 font-medium">{payment.from}</span>
-              <span className="text-amber-400 text-lg">→</span>
-              <span className="text-emerald-400 font-medium">{payment.to}</span>
+            <div className="bg-slate-700/30 rounded-lg p-3 space-y-2">
+              <div className="flex items-center justify-center gap-3 text-sm">
+                <span className="text-rose-400 font-medium">{payment.from}</span>
+                <span className="text-amber-400 text-lg">→</span>
+                <span className="text-emerald-400 font-medium">{payment.to}</span>
+              </div>
+              {rateLoading && <div className="text-center text-xs text-slate-400">Загрузка курса...</div>}
+              {exchangeRate && (
+                <div className="text-center text-xs">
+                  <span className="text-cyan-300 font-medium">1 {exchangeRate.from} = {exchangeRate.rate.toFixed(4)} {exchangeRate.to}</span>
+                </div>
+              )}
             </div>
           )}
-          <InputField label="Сумма" value={payment.amount} onChange={(v) => setPayment({ ...payment, amount: v })} type="number" />
+          <InputField label={`Сумма${exchangeRate ? ` (${balances.find((b) => b.name === payment.from)?.currency || ""})` : ""}`} value={payment.amount} onChange={(v) => setPayment({ ...payment, amount: v })} type="number" />
+          {exchangeRate && parseFloat(payment.amount) > 0 && (
+            <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-lg p-3 text-emerald-300 text-sm text-center">
+              {fmt(parseFloat(payment.amount))} {exchangeRate.from} = <span className="font-bold">{fmt(Math.round(parseFloat(payment.amount) * exchangeRate.rate * 100) / 100)} {exchangeRate.to}</span>
+            </div>
+          )}
           <InputField label="Описание" value={payment.desc} onChange={(v) => setPayment({ ...payment, desc: v })} />
           <InputField label="Дата" value={payment.date} onChange={(v) => setPayment({ ...payment, date: v })} type="date" />
           <div className="flex justify-end gap-3 pt-2">
@@ -3676,7 +4002,7 @@ const Infrastructure = ({ balances, setBalances, pushLog }) => {
                 payment.from && payment.to && parseFloat(payment.amount) > 0
                   ? "bg-emerald-500 hover:bg-emerald-600 text-white" : "bg-slate-700 text-slate-500 cursor-not-allowed"
               }`}>
-              Провести
+              {payment.from && payment.to && isInternalTransfer(payment.from, payment.to) ? "Перевести мгновенно" : "Провести"}
             </button>
           </div>
         </div>
@@ -3722,51 +4048,84 @@ const BankImport = ({ balances, setBalances }) => {
 
   return (
     <div className="space-y-6">
-      <Card className="p-5">
-        <h3 className="text-white font-semibold mb-4 flex items-center gap-2"><span className="text-emerald-400">💳</span> Импорт банковских платёжек</h3>
-        <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-4 mb-4 text-sm text-blue-300">
-          <p className="font-medium mb-2">Инструкция:</p>
-          <p>1. Скопируйте данные из банковской выписки (CSV; разделитель — точка с запятой)</p>
-          <p>2. Нажмите «Распарсить» → Назначьте инфраструктуру и тип → «Импортировать»</p>
+      {/* Инструкция */}
+      <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6">
+        <h3 className="text-[#1E3A5F] font-semibold text-base mb-4 flex items-center gap-2">
+          <span className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center text-lg">💳</span>
+          Импорт банковских платёжек
+        </h3>
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-5 text-sm text-blue-800">
+          <p className="font-semibold mb-2">Инструкция:</p>
+          <ol className="space-y-1 list-decimal list-inside text-blue-700">
+            <li>Скопируйте данные из банковской выписки (CSV; разделитель — точка с запятой)</li>
+            <li>Первая строка — заголовки, остальные — данные</li>
+            <li>Нажмите «Распарсить», назначьте инфраструктуру и тип каждой строке</li>
+            <li>Нажмите «Импортировать» для зачисления</li>
+          </ol>
         </div>
-        <textarea value={csvText} onChange={(e) => setCsvText(e.target.value)}
-          placeholder={"Дата;Описание;Сумма;Валюта\n2026-03-01;Оплата WENCOR;3500;USD"}
-          className="w-full h-32 px-4 py-3 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white font-mono placeholder-slate-600 focus:outline-none focus:border-blue-500 resize-none" />
-        <div className="flex justify-end mt-3">
-          <button onClick={parseCSV} className="px-4 py-2 bg-blue-500/20 hover:bg-blue-500/30 text-blue-300 rounded-lg text-sm font-medium border border-blue-500/30">Распарсить</button>
+        <div>
+          <label className="text-xs text-gray-500 font-medium mb-1.5 block uppercase tracking-wider">Вставьте данные выписки</label>
+          <textarea value={csvText} onChange={(e) => setCsvText(e.target.value)}
+            placeholder={"Дата;Описание;Сумма;Валюта\n2026-03-01;Оплата WENCOR;3500;USD"}
+            className="w-full h-36 px-4 py-3 bg-gray-50 border border-gray-300 rounded-lg text-sm text-gray-900 font-mono placeholder-gray-400 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 resize-none" />
         </div>
-      </Card>
+        <div className="flex justify-end mt-4">
+          <button onClick={parseCSV} disabled={!csvText.trim()}
+            className="px-5 py-2.5 bg-[#1E3A5F] hover:bg-[#2A4A6F] disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors">
+            Распарсить
+          </button>
+        </div>
+      </div>
 
+      {/* Таблица распознанных операций */}
       {parsedRows.length > 0 && (
-        <Card className="p-5">
-          <h3 className="text-white font-semibold mb-4">Распознанные операции ({parsedRows.length})</h3>
+        <div className="bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden">
+          <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+            <h3 className="text-[#1E3A5F] font-semibold text-base">
+              Распознанные операции <span className="text-gray-400 font-normal">({parsedRows.length})</span>
+            </h3>
+            <button onClick={importAll}
+              className="px-5 py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg text-sm font-medium transition-colors">
+              Импортировать
+            </button>
+          </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead><tr className="text-slate-400 text-xs border-b border-slate-700">
-                {Object.keys(parsedRows[0]).filter((k) => !k.startsWith("_")).map((h) => <th key={h} className="py-2 px-2 text-left">{h}</th>)}
-                <th className="py-2 px-2">Инфраструктура</th><th className="py-2 px-2">Тип</th>
-              </tr></thead>
-              <tbody>{parsedRows.map((row) => (
-                <tr key={row._id} className="border-b border-slate-700/30">
-                  {Object.entries(row).filter(([k]) => !k.startsWith("_")).map(([k, v]) => <td key={k} className="py-2 px-2 text-slate-300 text-xs">{v}</td>)}
-                  <td className="py-2 px-2">
-                    <select value={row._infra} onChange={(e) => updateRow(row._id, "_infra", e.target.value)} className="px-2 py-1 bg-slate-700 border border-slate-600 rounded text-xs text-white">
-                      <option value="">—</option>{balances.map((b) => <option key={b.name} value={b.name}>{b.name}</option>)}
-                    </select>
-                  </td>
-                  <td className="py-2 px-2">
-                    <select value={row._type} onChange={(e) => updateRow(row._id, "_type", e.target.value)} className="px-2 py-1 bg-slate-700 border border-slate-600 rounded text-xs text-white">
-                      <option value="income">Приход</option><option value="expense">Расход</option>
-                    </select>
-                  </td>
+              <thead>
+                <tr className="bg-[#1E3A5F] text-white text-center text-xs uppercase">
+                  {Object.keys(parsedRows[0]).filter((k) => !k.startsWith("_")).map((h) => (
+                    <th key={h} className="py-2.5 px-3 font-semibold">{h}</th>
+                  ))}
+                  <th className="py-2.5 px-3 font-semibold">Инфраструктура</th>
+                  <th className="py-2.5 px-3 font-semibold">Тип</th>
                 </tr>
-              ))}</tbody>
+              </thead>
+              <tbody className="bg-white">
+                {parsedRows.map((row, idx) => (
+                  <tr key={row._id} className={`border-b border-gray-200 hover:bg-blue-50 transition-colors ${idx % 2 === 1 ? "bg-gray-50" : ""}`}>
+                    {Object.entries(row).filter(([k]) => !k.startsWith("_")).map(([k, v]) => (
+                      <td key={k} className="py-2.5 px-3 text-center text-gray-700 text-xs">{v}</td>
+                    ))}
+                    <td className="py-2.5 px-3 text-center">
+                      <select value={row._infra} onChange={(e) => updateRow(row._id, "_infra", e.target.value)}
+                        className="px-2 py-1.5 bg-white border border-gray-300 rounded-lg text-xs text-gray-700 focus:outline-none focus:border-blue-500">
+                        <option value="">— Выберите —</option>
+                        {balances.map((b) => <option key={b.name} value={b.name}>{b.name}</option>)}
+                      </select>
+                    </td>
+                    <td className="py-2.5 px-3 text-center">
+                      <select value={row._type} onChange={(e) => updateRow(row._id, "_type", e.target.value)}
+                        className="px-2 py-1.5 bg-white border border-gray-300 rounded-lg text-xs text-gray-700 focus:outline-none focus:border-blue-500">
+                        <option value="income">Приход</option>
+                        <option value="expense">Расход</option>
+                      </select>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
             </table>
           </div>
-          <div className="flex justify-end mt-4">
-            <button onClick={importAll} className="px-6 py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg text-sm font-medium transition-colors">Импортировать</button>
-          </div>
-        </Card>
+        </div>
       )}
     </div>
   );
@@ -3775,34 +4134,123 @@ const BankImport = ({ balances, setBalances }) => {
 // ==================== MAIN APP ====================
 export default function App() {
   const [activeTab, setActiveTab] = useState("dashboard");
-  const [balances, setBalances] = useState(BALANCES_DATA);
-  const [debts, setDebts] = useState(DEBTS_DATA);
-  const [finResults, setFinResults] = useState(FIN_DATA);
-  const [openPo, setOpenPo] = useState(() => PO_DATA.map((r) => ({
-    ...r,
-    orderStage: r.orderStage || (r.status === "completed" ? "done" : r.status === "cancelled" ? "cancelled" : "in_work"),
-  })));
+  const [balances, setBalances] = useState([]);
+  const [debts, setDebts] = useState([]);
+  const [finResults, setFinResults] = useState([]);
+  const [openPo, setOpenPo] = useState([]);
+  const [infraData, setInfraData] = useState({});
+  const [pendingTransfersGlobal, setPendingTransfersGlobal] = useState([]);
   const [actionLog, setActionLog] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const [poRaw, fin, dbt, bal, infra, transfers] = await Promise.all([
+          api.fetchPO(), api.fetchFin(), api.fetchDebts(),
+          api.fetchBalances(), api.fetchInfra(), api.fetchTransfers(),
+        ]);
+        setOpenPo(poRaw.map((r) => ({
+          ...r,
+          customerAmount: parseFloat(r.customerAmount) || 0,
+          supplierAmount: parseFloat(r.supplierAmount) || 0,
+          deliveryCost: r.deliveryCost,
+          orderStage: r.orderStage || (r.status === "completed" ? "done" : r.status === "cancelled" ? "cancelled" : "in_work"),
+        })));
+        setFinResults(fin.map((r) => ({
+          ...r,
+          customerAmount: parseFloat(r.customerAmount) || 0,
+          supplierAmount: parseFloat(r.supplierAmount) || 0,
+          paymentFact: parseFloat(r.paymentFact) || 0,
+          paymentWithAgent: parseFloat(r.paymentWithAgent) || 0,
+          customsCost: parseFloat(r.customsCost) || 0,
+          deliveryCost: parseFloat(r.deliveryCost) || 0,
+          margin: parseFloat(r.margin) || 0,
+          netProfit: parseFloat(r.netProfit) || 0,
+        })));
+        setDebts(dbt.map((r) => ({ ...r, amount: parseFloat(r.amount) || 0 })));
+        setBalances(bal.map((r) => ({ ...r, balance: parseFloat(r.balance) || 0 })));
+        setInfraData(Object.fromEntries(
+          Object.entries(infra).map(([k, ops]) => [k, ops.map((o) => ({
+            ...o,
+            received: parseFloat(o.received) || 0,
+            outgoing: parseFloat(o.outgoing) || 0,
+            bankFees: parseFloat(o.bankFees) || 0,
+            balance: parseFloat(o.balance) || 0,
+          }))])
+        ));
+        setPendingTransfersGlobal(transfers.map((t) => ({
+          ...t,
+          amount: parseFloat(t.amount) || 0,
+          exchangeRate: parseFloat(t.exchangeRate) || 0,
+          convertedAmount: parseFloat(t.convertedAmount) || 0,
+          from: t.fromAcc || t.from || "",
+          to: t.toAcc || t.to || "",
+          desc: t.description || t.desc || "",
+        })));
+      } catch (err) {
+        console.error("Ошибка загрузки данных:", err);
+      } finally {
+        setLoading(false);
+      }
+    };
+    load();
+  }, []);
+
+  const makeSyncSetter = useCallback((rawSetter, updateFn, deleteFn) => {
+    return (updater) => {
+      rawSetter((prev) => {
+        const next = typeof updater === "function" ? updater(prev) : updater;
+        setTimeout(() => {
+          const prevMap = new Map(prev.map((r) => [r.id, r]));
+          const nextMap = new Map(next.map((r) => [r.id, r]));
+          for (const [id, item] of nextMap) {
+            const old = prevMap.get(id);
+            if (old && old !== item) {
+              const changes = {};
+              for (const [k, v] of Object.entries(item)) {
+                if (v !== old[k]) changes[k] = v;
+              }
+              if (Object.keys(changes).length > 0) {
+                updateFn(id, changes).catch((e) => console.error("Sync update error:", e));
+              }
+            }
+          }
+          for (const [id] of prevMap) {
+            if (!nextMap.has(id) && deleteFn) {
+              deleteFn(id).catch((e) => console.error("Sync delete error:", e));
+            }
+          }
+        }, 0);
+        return next;
+      });
+    };
+  }, []);
+
+  const syncOpenPo = useMemo(() => makeSyncSetter(setOpenPo, api.updatePO, api.deletePO), [makeSyncSetter]);
+  const syncFinResults = useMemo(() => makeSyncSetter(setFinResults, api.updateFin, api.deleteFin), [makeSyncSetter]);
+  const syncDebts = useMemo(() => makeSyncSetter(setDebts, api.updateDebt, null), [makeSyncSetter]);
+  const syncBalances = useMemo(() => makeSyncSetter(setBalances, (id, data) => api.updateBalance(id, data.balance), null), [makeSyncSetter]);
 
   const pushLog = useCallback((a) => setActionLog((prev) => [...prev, a]), []);
 
   const undo = () => {
     if (!actionLog.length) return;
     const last = actionLog[actionLog.length - 1];
-    if (last.type === "fin_status") setFinResults((prev) => prev.map((r) => (r.id === last.id ? { ...r, status: last.prev } : r)));
-    if (last.type === "fin_upd") setFinResults((prev) => prev.map((r) => (r.id === last.id ? { ...r, ...last.prev, updFile: null } : r)));
-    if (last.type === "fin_payment") setFinResults((prev) => prev.map((r) => (r.id === last.id ? { ...r, paymentFact: last.prev.paymentFact, paymentDoc: null, paymentDate: "" } : r)));
-    if (last.type === "fin_edit") setFinResults((prev) => prev.map((r) => (r.id === last.id ? { ...last.prev } : r)));
-    if (last.type === "fin_delete") setFinResults((prev) => [...prev, last.prev]);
-    if (last.type === "po_status" || last.type === "po_cancel") setOpenPo((prev) => prev.map((r) => (r.id === last.id ? { ...r, status: last.prev?.status || last.prev, cancelReason: last.prev?.cancelReason || "" } : r)));
-    if (last.type === "po_upd") setOpenPo((prev) => prev.map((r) => (r.id === last.id ? { ...r, ...last.prev, updFile: null } : r)));
-    if (last.type === "po_edit") setOpenPo((prev) => prev.map((r) => (r.id === last.id ? { ...last.prev } : r)));
-    if (last.type === "po_inline_edit") setOpenPo((prev) => prev.map((r) => (r.id === last.id ? { ...r, [last.field]: last.prev } : r)));
-    if (last.type === "po_logistics") setOpenPo((prev) => prev.map((r) => (r.id === last.id ? { ...r, ...last.prev } : r)));
-    if (last.type === "po_stage") setOpenPo((prev) => prev.map((r) => (r.id === last.id ? { ...r, orderStage: last.prev, status: last.prevStatus || "active" } : r)));
-    if (last.type === "po_delete") setOpenPo((prev) => [...prev, last.prev]);
-    if (last.type === "debt_close") setDebts((prev) => prev.map((d) => (d.id === last.id ? { ...d, ...last.prev } : d)));
-    if (last.type === "infra_payment") setBalances((prev) => prev.map((b) => (b.name === last.accName ? { ...b, balance: last.prev } : b)));
+    if (last.type === "fin_status") syncFinResults((prev) => prev.map((r) => (r.id === last.id ? { ...r, status: last.prev } : r)));
+    if (last.type === "fin_upd") syncFinResults((prev) => prev.map((r) => (r.id === last.id ? { ...r, ...last.prev, updFileId: null } : r)));
+    if (last.type === "fin_payment") syncFinResults((prev) => prev.map((r) => (r.id === last.id ? { ...r, paymentFact: last.prev.paymentFact, paymentDocFileId: null, paymentDate: "" } : r)));
+    if (last.type === "fin_edit") syncFinResults((prev) => prev.map((r) => (r.id === last.id ? { ...last.prev } : r)));
+    if (last.type === "fin_delete") syncFinResults((prev) => [...prev, last.prev]);
+    if (last.type === "po_status" || last.type === "po_cancel") syncOpenPo((prev) => prev.map((r) => (r.id === last.id ? { ...r, status: last.prev?.status || last.prev, cancelReason: last.prev?.cancelReason || "" } : r)));
+    if (last.type === "po_upd") syncOpenPo((prev) => prev.map((r) => (r.id === last.id ? { ...r, ...last.prev, updFileId: null } : r)));
+    if (last.type === "po_edit") syncOpenPo((prev) => prev.map((r) => (r.id === last.id ? { ...last.prev } : r)));
+    if (last.type === "po_inline_edit") syncOpenPo((prev) => prev.map((r) => (r.id === last.id ? { ...r, [last.field]: last.prev } : r)));
+    if (last.type === "po_logistics") syncOpenPo((prev) => prev.map((r) => (r.id === last.id ? { ...r, ...last.prev } : r)));
+    if (last.type === "po_stage") syncOpenPo((prev) => prev.map((r) => (r.id === last.id ? { ...r, orderStage: last.prev, status: last.prevStatus || "active" } : r)));
+    if (last.type === "po_delete") syncOpenPo((prev) => [...prev, last.prev]);
+    if (last.type === "debt_close") syncDebts((prev) => prev.map((d) => (d.id === last.id ? { ...d, ...last.prev } : d)));
+    if (last.type === "infra_payment") syncBalances((prev) => prev.map((b) => (b.name === last.accName ? { ...b, balance: last.prev } : b)));
     setActionLog((prev) => prev.slice(0, -1));
   };
 
@@ -3828,9 +4276,9 @@ export default function App() {
           <div className="flex items-center gap-2 mb-4">
             <div className="w-8 h-8 bg-white rounded flex items-center justify-center">
               <span className="text-[#1E3A5F] font-bold text-lg">G</span>
-        </div>
+            </div>
             <span className="font-semibold text-sm">Финансы</span>
-      </div>
+          </div>
         </div>
 
         {/* Навигационное меню */}
@@ -3932,12 +4380,19 @@ export default function App() {
         </div>
 
         <div className="p-6">
-          {activeTab === "dashboard" && <Dashboard balances={balances} debts={debts} finResults={finResults} openPo={openPo} />}
-          {activeTab === "fin" && <FinResults data={finResults} setData={setFinResults} pushLog={pushLog} debts={debts} setDebts={setDebts} />}
-          {activeTab === "openpo" && <OpenPO data={openPo} setData={setOpenPo} pushLog={pushLog} finResults={finResults} setFinResults={setFinResults} />}
-          {activeTab === "debts" && <Debts debts={debts} setDebts={setDebts} pushLog={pushLog} finResults={finResults} setFinResults={setFinResults} openPo={openPo} />}
-          {activeTab === "infra" && <Infrastructure balances={balances} setBalances={setBalances} pushLog={pushLog} />}
-          {activeTab === "import" && <BankImport balances={balances} setBalances={setBalances} />}
+          {loading ? (
+            <div className="flex flex-col items-center justify-center py-32">
+              <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+              <div className="text-gray-500 text-sm">Загрузка данных...</div>
+            </div>
+          ) : (<>
+          {activeTab === "dashboard" && <Dashboard balances={balances} debts={debts} finResults={finResults} openPo={openPo} infraData={infraData} />}
+          {activeTab === "fin" && <FinResults data={finResults} setData={syncFinResults} pushLog={pushLog} debts={debts} setDebts={syncDebts} />}
+          {activeTab === "openpo" && <OpenPO data={openPo} setData={syncOpenPo} pushLog={pushLog} finResults={finResults} setFinResults={syncFinResults} />}
+          {activeTab === "debts" && <Debts debts={debts} setDebts={syncDebts} pushLog={pushLog} finResults={finResults} setFinResults={syncFinResults} openPo={openPo} />}
+          {activeTab === "infra" && <Infrastructure balances={balances} setBalances={syncBalances} pushLog={pushLog} infraData={infraData} setInfraData={setInfraData} pendingTransfers={pendingTransfersGlobal} setPendingTransfers={setPendingTransfersGlobal} />}
+          {activeTab === "import" && <BankImport balances={balances} setBalances={syncBalances} />}
+          </>)}
         </div>
       </div>
     </div>
