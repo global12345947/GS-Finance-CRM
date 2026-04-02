@@ -305,6 +305,7 @@ const parseExternalPOs = (order) => {
   const datesPlaced = (order.datePlacedSupplier || "").split("\n").map((s) => s.trim()).filter(Boolean);
   const procurements = (order.respProcurement || "").split("\n").map((s) => s.trim()).filter(Boolean);
   const logistics = (order.logisticsPlan || "").split("\n").map((s) => s.trim()).filter(Boolean);
+  const datesPaid = (order.datePaidSupplier || "").split("\n").map((s) => s.trim());
   const count = Math.max(refs.length, 1);
   const result = [];
   for (let i = 0; i < count; i++) {
@@ -317,6 +318,7 @@ const parseExternalPOs = (order) => {
       payingCompany: payCompanies[i] || (payCompanies.length === 1 ? payCompanies[0] : ""),
       supplierAmount: amounts[i] || "",
       datePlaced: datesPlaced[i] || (datesPlaced.length === 1 ? datesPlaced[0] : ""),
+      datePaid: datesPaid[i] || (datesPaid.length === 1 ? datesPaid[0] : ""),
       respProcurement: procurements[i] || (procurements.length === 1 ? procurements[0] : ""),
       logisticsPlan: logistics[i] || (logistics.length === 1 ? logistics[0] : ""),
       cancelled,
@@ -998,7 +1000,7 @@ const FinStatusDropdown = ({ order, onChangeStatus }) => {
 };
 
 // ==================== ФИН. РЕЗУЛЬТАТ ====================
-const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
+const FinResults = ({ data, setData, pushLog, debts, setDebts, acquireLock, releaseLock, isLockedByOther, getLockUser }) => {
   const [filter, setFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState("all");
   const [search, setSearch] = useState("");
@@ -1141,7 +1143,28 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
     setData((prev) => prev.filter((o) => o.id !== r.id));
   };
 
+  const parseFinSuppliers = (r) => {
+    const pos = (r.supplierPo || "").split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+    const supps = (r.supplier || "").split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+    const amts = (r.supplierAmounts || "").split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+    const buyers = (r.finalBuyer || "").split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+    const count = Math.max(pos.length, supps.length, 1);
+    const result = [];
+    for (let i = 0; i < count; i++) {
+      result.push({
+        po: pos[i] || "",
+        supplier: supps[i] || (supps.length === 1 ? supps[0] : ""),
+        amount: amts[i] || "",
+        buyer: buyers[i] || (buyers.length === 1 ? buyers[0] : ""),
+      });
+    }
+    return result;
+  };
+
   const openEdit = (r) => {
+    if (isLockedByOther?.("fin", r.id)) return;
+    acquireLock?.("fin", r.id);
+    const extSupps = parseFinSuppliers(r);
     setEditForm({
       customer: r.customer || "",
       customerPo: r.customerPo || "",
@@ -1149,17 +1172,12 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
       customerAmount: r.customerAmount || 0,
       orderStatus: r.orderStatus || "",
       paymentFact: r.paymentFact || 0,
-      supplierPo: r.supplierPo || "",
-      supplierAmount: r.supplierAmount || 0,
-      supplier: r.supplier || "",
-      finalBuyer: r.finalBuyer || "",
       finAgent: r.finAgent || "",
       customsCost: r.customsCost || 0,
       deliveryCost: r.deliveryCost || 0,
       comment: r.comment || "",
       type: r.type || "domestic",
       status: r.status || "active",
-      // УПД поля (только чтение — приходят из Open PO)
       hasUpd: r.hasUpd || false,
       noGlobalSmart: r.noGlobalSmart || false,
       updNum: r.updNum || "",
@@ -1167,6 +1185,7 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
       paymentDocFileId: r.paymentDocFileId || null,
       paymentDate: r.paymentDate || "",
       _newPayDoc: null,
+      externalOrders: extSupps,
     });
     setEditModal(r);
   };
@@ -1189,6 +1208,13 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
     const newPaymentFact = parseFloat(editForm.paymentFact) || 0;
     const oldPaymentFact = parseFloat(editModal.paymentFact) || 0;
 
+    const finExts = editForm.externalOrders || [];
+    const flatSupplierPo = finExts.map((e) => e.po).join("\n");
+    const flatSupplier = finExts.map((e) => e.supplier).join("\n");
+    const flatBuyer = finExts.map((e) => e.buyer).join("\n");
+    const flatAmounts = finExts.map((e) => e.amount || "0").join("\n");
+    const totalSupplierAmount = finExts.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
+
     setData((prev) =>
       prev.map((x) =>
         x.id === editModal.id
@@ -1199,10 +1225,11 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
               orderDate: editForm.orderDate,
               customerAmount: parseFloat(editForm.customerAmount) || 0,
               paymentFact: newPaymentFact,
-              supplierPo: editForm.supplierPo,
-              supplierAmount: parseFloat(editForm.supplierAmount) || 0,
-              supplier: editForm.supplier,
-              finalBuyer: editForm.finalBuyer,
+              supplierPo: flatSupplierPo,
+              supplierAmount: totalSupplierAmount,
+              supplierAmounts: flatAmounts,
+              supplier: flatSupplier,
+              finalBuyer: flatBuyer,
               finAgent: editForm.finAgent,
               customsCost: parseFloat(editForm.customsCost) || 0,
               deliveryCost: parseFloat(editForm.deliveryCost) || 0,
@@ -1224,6 +1251,12 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
       }));
     }
 
+    releaseLock?.("fin", editModal.id);
+    setEditModal(null);
+  };
+
+  const closeEditModal = () => {
+    if (editModal) releaseLock?.("fin", editModal.id);
     setEditModal(null);
   };
 
@@ -1391,15 +1424,69 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
                       </button>
                     )}
                   </td>
-                  <td className="py-2.5 px-2 text-center text-gray-700 font-mono text-xs max-w-[100px] truncate">{r.supplierPo}</td>
-                  <td className="py-2.5 px-2 text-center text-gray-700 font-mono text-xs">{r.supplierAmount ? "$" + fmt(r.supplierAmount) : "—"}</td>
-                  <td className="py-2.5 px-2 text-center text-gray-700 text-xs max-w-[120px] truncate">{r.supplier}</td>
-                  <td className="py-2.5 px-2 text-center text-gray-600 text-xs max-w-[80px] truncate">{r.finalBuyer || "—"}</td>
+                  {/* External PO / Сумма / Поставщик / Структура — per-supplier */}
+                  {(() => {
+                    const pos = (r.supplierPo || "").split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+                    const supps = (r.supplier || "").split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+                    const perAmounts = (r.supplierAmounts || "").split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+                    const buyers = (r.finalBuyer || "").split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+                    const count = Math.max(pos.length, supps.length, 1);
+                    const totalAmount = parseFloat(r.supplierAmount) || 0;
+                    const hasMultiple = count > 1;
+                    const allPaidFromPO = false; // в фин. результате нет поля статуса оплаты поставщика — используем collapsed для completed
+                    const isCollapsed = hasMultiple && r.status === "completed";
+                    return (<>
+                      {/* External PO — стиль как PO клиента */}
+                      <td className="py-2.5 px-2 text-center font-mono text-xs max-w-[140px]">
+                        {!pos.length ? <span className="text-gray-400">—</span> : (
+                          <div className="space-y-0.5">{pos.map((p, i) => <div key={i} className="text-gray-900 truncate text-xs leading-tight">{p}</div>)}</div>
+                        )}
+                      </td>
+                      {/* Сумма поставщика */}
+                      <td className="py-2.5 px-2 text-center text-gray-700 font-mono text-xs relative" onClick={(e) => e.stopPropagation()}>
+                        {!totalAmount ? "—" : isCollapsed && perAmounts.length > 1 ? (
+                          <div className="group/fin-amt relative inline-block">
+                            <span className="cursor-pointer hover:bg-blue-50 px-1 py-0.5 rounded transition-colors font-medium">${fmt(totalAmount)}</span>
+                            <div className="hidden group-hover/fin-amt:block absolute z-50 top-full left-1/2 -translate-x-1/2 mt-1 bg-white rounded-lg shadow-xl border border-gray-200 py-2 px-3 min-w-[200px] text-left">
+                              <div className="text-[10px] text-gray-400 font-semibold uppercase tracking-wider mb-1.5">Детали по поставщикам</div>
+                              {Array.from({ length: count }).map((_, i) => (
+                                <div key={i} className="flex justify-between items-center py-1 border-b border-gray-50 last:border-0">
+                                  <span className="text-xs text-gray-700 truncate mr-2">{supps[i] || pos[i] || `#${i + 1}`}</span>
+                                  <span className="text-xs font-medium text-gray-900 whitespace-nowrap">${fmt(parseFloat(perAmounts[i]) || 0)}</span>
+                                </div>
+                              ))}
+                              <div className="flex justify-between items-center pt-1.5 mt-1 border-t border-gray-200">
+                                <span className="text-xs font-semibold text-gray-500">Итого</span>
+                                <span className="text-xs font-bold text-gray-900">${fmt(totalAmount)}</span>
+                              </div>
+                            </div>
+                          </div>
+                        ) : perAmounts.length > 1 ? (
+                          <div className="space-y-0.5">{perAmounts.map((a, i) => <div key={i} className="text-xs leading-tight">${fmt(parseFloat(a) || 0)}</div>)}</div>
+                        ) : (
+                          <span>${fmt(totalAmount)}</span>
+                        )}
+                      </td>
+                      {/* Поставщик — стиль как Клиент */}
+                      <td className="py-2.5 px-2 text-center max-w-[140px]">
+                        {!supps.length ? <span className="text-gray-400">—</span> : (
+                          <div className="space-y-0.5">{supps.map((s, i) => <div key={i} className="text-[#1E3A5F] font-semibold truncate text-xs leading-tight">{s}</div>)}</div>
+                        )}
+                      </td>
+                      {/* Структура */}
+                      <td className="py-2.5 px-2 text-center text-gray-600 text-xs max-w-[80px] truncate">
+                        {buyers.length > 0 ? buyers.filter((v, i, a) => a.indexOf(v) === i).join(", ") : "—"}
+                      </td>
+                    </>);
+                  })()}
                   <td className="py-2.5 px-2" onClick={(e) => e.stopPropagation()}>
                     <FinStatusDropdown order={r} onChangeStatus={handleFinStage} />
                   </td>
                   <td className="py-2.5 px-2">
                     <div className="flex items-center gap-1">
+                    {isLockedByOther?.("fin", r.id) ? (
+                      <span className="text-xs text-amber-500 cursor-not-allowed" title={`Редактирует: ${getLockUser?.("fin", r.id)}`}>🔒</span>
+                    ) : (
                     <button
                         onClick={(e) => { e.stopPropagation(); openEdit(r); }}
                         className="text-blue-600 hover:text-blue-800 text-xs transition-colors"
@@ -1407,6 +1494,7 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
                       >
                         ✏️
                     </button>
+                    )}
                       <button
                         onClick={(e) => { e.stopPropagation(); deleteOrder(r); }}
                         className="text-red-400 hover:text-red-600 text-xs transition-colors"
@@ -1540,10 +1628,6 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
                 ["Сумма клиента ($)", "$" + fmt(detailModal.customerAmount)],
                 ["Статус заказа / УПД", detailModal.noGlobalSmart ? "Без участия GS" : (detailModal.orderStatus || "—")],
                 ["Оплата факт (руб)", fmt(detailModal.paymentFact)],
-                ["PO поставщика", detailModal.supplierPo],
-                ["Сумма поставщика ($)", "$" + fmt(detailModal.supplierAmount)],
-                ["Поставщик", detailModal.supplier],
-                ["Структура", detailModal.finalBuyer || "—"],
                 ["Фин. агент", detailModal.finAgent || "—"],
                 ["Оплата с агентскими", fmt(detailModal.paymentWithAgent)],
                 ["Таможня", fmt(detailModal.customsCost)],
@@ -1557,6 +1641,27 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
                 </div>
               ))}
             </div>
+            {/* Поставщики — per-supplier */}
+            {(() => {
+              const dSupps = parseFinSuppliers(detailModal);
+              if (!dSupps.length || (!dSupps[0].po && !dSupps[0].supplier)) return null;
+              return (
+                <div className="border border-slate-600/50 rounded-lg p-3">
+                  <div className="text-xs text-slate-400 uppercase tracking-wider mb-2 font-semibold">Поставщики</div>
+                  <div className="space-y-2">
+                    {dSupps.map((s, i) => (
+                      <div key={i} className="flex items-center gap-4 text-sm bg-slate-700/30 rounded-lg px-3 py-2">
+                        <div className="flex-1"><span className="text-slate-500 text-xs mr-1">PO:</span><span className="text-slate-200 font-mono">{s.po || "—"}</span></div>
+                        <div className="flex-1"><span className="text-slate-500 text-xs mr-1">Поставщик:</span><span className="text-slate-200">{s.supplier || "—"}</span></div>
+                        <div><span className="text-slate-500 text-xs mr-1">Сумма:</span><span className="text-slate-200">${fmt(parseFloat(s.amount) || 0)}</span></div>
+                        <div><span className="text-slate-500 text-xs mr-1">Структура:</span><span className="text-slate-200">{s.buyer || "—"}</span></div>
+                      </div>
+                    ))}
+                    <div className="text-right text-sm text-slate-300 font-semibold pt-1">Итого: ${fmt(parseFloat(detailModal.supplierAmount) || 0)}</div>
+                  </div>
+                </div>
+              );
+            })()}
             {detailModal.comment && (
               <div className="bg-slate-700/30 p-3 rounded-lg text-sm">
                 <div className="text-slate-500 text-xs mb-1">Комментарий</div>
@@ -1581,7 +1686,7 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
       </Modal>
 
       {/* Модал редактирования заказа */}
-      <Modal isOpen={!!editModal} onClose={() => setEditModal(null)} title={`Редактирование — ${editModal?.customerPo || ""}`} wide>
+      <Modal isOpen={!!editModal} onClose={closeEditModal} title={`Редактирование — ${editModal?.customerPo || ""}`} wide>
         {editModal && (
           <div className="space-y-4 max-h-[75vh] overflow-y-auto pr-1">
             {/* Основные данные заказа */}
@@ -1592,10 +1697,6 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
                 <InputField label="PO клиента" value={editForm.customerPo} onChange={(v) => setEditForm({ ...editForm, customerPo: v })} />
                 <InputField label="Дата заказа" value={editForm.orderDate} onChange={(v) => setEditForm({ ...editForm, orderDate: v })} type="date" />
                 <InputField label="Сумма клиента ($)" value={editForm.customerAmount} onChange={(v) => setEditForm({ ...editForm, customerAmount: v })} type="number" />
-                <InputField label="PO поставщика" value={editForm.supplierPo} onChange={(v) => setEditForm({ ...editForm, supplierPo: v })} />
-                <InputField label="Сумма поставщика ($)" value={editForm.supplierAmount} onChange={(v) => setEditForm({ ...editForm, supplierAmount: v })} type="number" />
-                <InputField label="Поставщик" value={editForm.supplier} onChange={(v) => setEditForm({ ...editForm, supplier: v })} />
-                <InputField label="Структура (фин. покупатель)" value={editForm.finalBuyer} onChange={(v) => setEditForm({ ...editForm, finalBuyer: v })} />
                 <InputField label="Фин. агент" value={editForm.finAgent} onChange={(v) => setEditForm({ ...editForm, finAgent: v })} />
                 <InputField label="Таможня ($)" value={editForm.customsCost} onChange={(v) => setEditForm({ ...editForm, customsCost: v })} type="number" />
                 <InputField label="Перевозка ($)" value={editForm.deliveryCost} onChange={(v) => setEditForm({ ...editForm, deliveryCost: v })} type="number" />
@@ -1615,6 +1716,42 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
                   </div>
                 </div>
               </div>
+            </div>
+
+            {/* Блок External PO (поставщики) */}
+            <div className="border border-slate-600 rounded-lg p-3 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-semibold text-slate-300">Заказы поставщикам</span>
+                <button onClick={() => setEditForm({ ...editForm, externalOrders: [...(editForm.externalOrders || []), { po: "", supplier: "", amount: "", buyer: "" }] })}
+                  className="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white rounded text-xs font-medium transition-colors">+ Добавить</button>
+              </div>
+              {(editForm.externalOrders || []).map((ext, ei) => (
+                <div key={ei} className="bg-slate-700/40 rounded-lg p-3 relative">
+                  {(editForm.externalOrders || []).length > 1 && (
+                    <button onClick={() => setEditForm({ ...editForm, externalOrders: editForm.externalOrders.filter((_, i) => i !== ei) })}
+                      className="absolute top-2 right-2 text-red-400 hover:text-red-300 text-xs" title="Удалить">✕</button>
+                  )}
+                  <span className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">Поставщик #{ei + 1}</span>
+                  <div className="grid grid-cols-2 gap-2 mt-2">
+                    <InputField label="External PO" value={ext.po} onChange={(v) => {
+                      const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], po: v };
+                      setEditForm({ ...editForm, externalOrders: upd });
+                    }} />
+                    <InputField label="Поставщик" value={ext.supplier} onChange={(v) => {
+                      const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], supplier: v };
+                      setEditForm({ ...editForm, externalOrders: upd });
+                    }} />
+                    <InputField label="Сумма ($)" value={ext.amount} onChange={(v) => {
+                      const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], amount: v };
+                      setEditForm({ ...editForm, externalOrders: upd });
+                    }} type="number" />
+                    <InputField label="Структура (покупатель)" value={ext.buyer} onChange={(v) => {
+                      const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], buyer: v };
+                      setEditForm({ ...editForm, externalOrders: upd });
+                    }} />
+                  </div>
+                </div>
+              ))}
             </div>
 
             {/* Информация УПД (только чтение — подгружается из Open PO) */}
@@ -1673,7 +1810,7 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
                 className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500 h-20 resize-none" />
             </div>
             <div className="flex justify-end gap-3 pt-2 sticky bottom-0 bg-slate-800 py-3 -mx-1 px-1">
-              <button onClick={() => setEditModal(null)} className="px-4 py-2 text-slate-400 hover:text-white text-sm">Отмена</button>
+              <button onClick={closeEditModal} className="px-4 py-2 text-slate-400 hover:text-white text-sm">Отмена</button>
               <button onClick={saveEdit} className="px-6 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-medium transition-colors">
                 💾 Сохранить
               </button>
@@ -1900,7 +2037,7 @@ const ExpandedLogisticsPanel = ({ order, setData, pushLog }) => {
 };
 
 // ==================== OPEN PO ====================
-const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
+const OpenPO = ({ data, setData, pushLog, finResults, setFinResults, acquireLock, releaseLock, isLockedByOther, getLockUser }) => {
   const [filter, setFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState("domestic");
   const [search, setSearch] = useState("");
@@ -1952,9 +2089,11 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
   // Синхронизация УПД: OpenPO → Фин. результат (по совпадению PO клиента)
   const syncUpdToFinResults = useCallback((poInternalPo, hasUpd, updNum, updDate, updFileId, noGlobalSmart) => {
     if (!setFinResults) return;
+    const norm = (s) => (s || "").replace(/\s+/g, "").toLowerCase();
+    const poNorm = norm(poInternalPo);
     setFinResults((prev) =>
       prev.map((fr) => {
-        if (fr.customerPo === poInternalPo) {
+        if (norm(fr.customerPo) === poNorm) {
           if (hasUpd) {
             return {
               ...fr,
@@ -2107,11 +2246,21 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
 
   const deleteOrder = (r) => {
     if (!window.confirm(`Удалить заказ ${r.internalPo || r.customerPo || r.num}? Действие можно отменить.`)) return;
-    pushLog({ type: "po_delete", id: r.id, prev: { ...r } });
+    const norm = (s) => (s || "").replace(/\s+/g, "").toLowerCase();
+    const poNorm = norm(r.internalPo);
+    const linkedFin = finResults?.find((fr) => norm(fr.customerPo) === poNorm) || null;
+    const linkedFinId = linkedFin?.id || null;
+    pushLog({ type: "po_delete", id: r.id, prev: { ...r }, linkedFinId });
     setData((prev) => prev.filter((o) => o.id !== r.id));
+    if (linkedFinId && setFinResults) {
+      setFinResults((prev) => prev.filter((fr) => fr.id !== linkedFinId));
+      api.deleteFin(linkedFinId).catch((e) => console.error("Ошибка удаления фин. результата:", e));
+    }
   };
 
   const startEdit = (r) => {
+    if (isLockedByOther?.("po", r.id)) return;
+    acquireLock?.("po", r.id);
     setEditModal(r);
     const exts = parseExternalPOs(r);
     setEditForm({
@@ -2119,7 +2268,6 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
       customerAmount: r.customerAmount,
       paymentStatusCustomer: r.paymentStatusCustomer,
       dateCustomerPaid: r.dateCustomerPaid || "",
-      datePaidSupplier: r.datePaidSupplier || "",
       comments: r.comments, awb: r.awb, tracking: r.tracking,
       customerDeadline: r.customerDeadline, termsDelivery: r.termsDelivery,
       hasUpd: r.hasUpd || false, noGlobalSmart: r.noGlobalSmart || false,
@@ -2148,6 +2296,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
       supplierAmount: exts.reduce((s, e) => s + (parseFloat(e.supplierAmount) || 0), 0),
       supplierAmounts: exts.map((e) => e.supplierAmount || "0").join("\n"),
       paymentStatusSupplier: exts.map((e) => e.payment).join("\n"),
+      datePaidSupplier: exts.map((e) => e.datePaid || "").join("\n"),
       payingCompany: exts.map((e) => e.payingCompany).join("\n"),
       datePlacedSupplier: exts.map((e) => e.datePlaced).join("\n"),
       respProcurement: exts.map((e) => e.respProcurement).join("\n"),
@@ -2171,10 +2320,16 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
     delete updatedForm._newUpdFile;
     setData((prev) => prev.map((r) => (r.id === editModal.id ? { ...r, ...updatedForm } : r)));
     syncUpdToFinResults(editModal.internalPo, updatedForm.hasUpd, updatedForm.updNum, updatedForm.updDate, updatedForm.updFileId, updatedForm.noGlobalSmart);
+    releaseLock?.("po", editModal.id);
     setEditModal(null);
   };
 
-  const emptyExtPO = { po: "", supplier: "", supplierAmount: 0, payment: "", payingCompany: "", datePlaced: "", respProcurement: "", logisticsPlan: "", cancelled: false, cancelReason: "" };
+  const closeEditModal = () => {
+    if (editModal) releaseLock?.("po", editModal.id);
+    setEditModal(null);
+  };
+
+  const emptyExtPO = { po: "", supplier: "", supplierAmount: 0, payment: "", payingCompany: "", datePlaced: "", datePaid: "", respProcurement: "", logisticsPlan: "", cancelled: false, cancelReason: "" };
   const handleAddPO = async () => {
     const num = String(data.length + 1);
     const exts = newPO.externalOrders || [emptyExtPO];
@@ -2188,6 +2343,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
       supplierName: exts.map((e) => e.supplier).join("\n"),
       supplierAmounts: exts.map((e) => e.supplierAmount || "0").join("\n"),
       paymentStatusSupplier: exts.map((e) => e.payment).join("\n"),
+      datePaidSupplier: exts.map((e) => e.datePaid || "").join("\n"),
       payingCompany: exts.map((e) => e.payingCompany).join("\n"),
       datePlacedSupplier: exts.map((e) => e.datePlaced).join("\n"),
       respProcurement: exts.map((e) => e.respProcurement).join("\n"),
@@ -2218,10 +2374,11 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
           customerAmount: parseFloat(newPO.customerAmount) || 0,
           orderStatus: "",
           paymentFact: 0,
-          supplierPo: activeExts.map((e) => e.po).join(", "),
+          supplierPo: activeExts.map((e) => e.po).join("\n"),
           supplierAmount: activeExts.reduce((s, e) => s + (parseFloat(e.supplierAmount) || 0), 0),
-          supplier: activeExts.map((e) => e.supplier).filter(Boolean).join(", "),
-          finalBuyer: activeExts.map((e) => e.payingCompany).filter(Boolean)[0] || "",
+          supplierAmounts: activeExts.map((e) => e.supplierAmount || "0").join("\n"),
+          supplier: activeExts.map((e) => e.supplier).join("\n"),
+          finalBuyer: activeExts.map((e) => e.payingCompany).filter(Boolean).join("\n"),
           finAgent: "",
           customsCost: 0,
           deliveryCost: 0,
@@ -2428,88 +2585,150 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                         </span>
                       )}
                     </td>
-                    {/* External PO — номера с зачёркиванием */}
-                    <td className="py-2 px-2 text-center font-mono text-xs max-w-[120px]">
-                      {(() => {
-                        const refs = (o.internalPoRef || "").split("\n").map((s) => s.trim()).filter(Boolean);
-                        if (!refs.length) return <span className="text-gray-400">—</span>;
-                        return <div className="space-y-0.5">
-                          {refs.map((ref, ri) => {
-                            const isCancelled = ref.startsWith("~");
-                            const displayRef = isCancelled ? ref.substring(1) : ref;
-                            return <div key={ri} className={`truncate text-[10px] leading-tight ${isCancelled ? "line-through text-gray-400" : "text-gray-600"}`}>{displayRef}</div>;
-                          })}
-                        </div>;
-                      })()}
-                    </td>
-                    {/* Поставщик — данные заказа (без отменённых PO) */}
+                    {/* External PO / Поставщик / Сумма / Статус / Дата / Компания — per-supplier */}
                     {(() => {
-                      const exts = parseExternalPOs(o);
-                      const active = exts.filter((e) => !e.cancelled);
-                      const suppliers = active.map((e) => e.supplier).filter(Boolean);
-                      const amounts = active.map((e) => e.supplierAmount).filter(Boolean);
-                      const payments = active.map((e) => e.payment).filter(Boolean);
+                      const allExts = parseExternalPOs(o);
+                      const active = allExts.filter((e) => !e.cancelled);
+                      const cancelled = allExts.filter((e) => e.cancelled);
+                      const allPaid = active.length > 0 && active.every((e) => e.payment?.toLowerCase() === "paid");
+                      const isCollapsed = allPaid && active.length > 1;
+                      const totalAmount = active.reduce((s, e) => s + (parseFloat(e.supplierAmount) || 0), 0);
                       const companies = active.map((e) => e.payingCompany).filter(Boolean);
+                      const [expandedAmounts, setExpandedAmounts_] = [
+                        inlineEdit?.id === o.id && inlineEdit?.field === "_expandAmounts",
+                        (v) => v ? setInlineEdit({ id: o.id, field: "_expandAmounts" }) : setInlineEdit(null),
+                      ];
                       return (<>
-                        <td className="py-2 px-2 text-center text-xs max-w-[120px]">
-                          {!suppliers.length ? <span className="text-gray-400">—</span> :
-                            suppliers.length === 1 ? <span className="text-gray-700 truncate block">{suppliers[0]}</span> :
-                            <div className="space-y-0.5">{suppliers.map((n, i) => <div key={i} className="text-gray-700 truncate text-[10px] leading-tight">{n}</div>)}</div>}
-                        </td>
-                        <td className="py-2 px-2 text-center text-gray-700 tabular-nums whitespace-nowrap text-xs">
-                          {amounts.length > 1 ? <div className="space-y-0.5">{amounts.map((a, i) => <div key={i} className="text-[10px] leading-tight">${fmt(parseFloat(a) || 0)}</div>)}</div>
-                            : amounts.length === 1 ? "$" + fmt(parseFloat(amounts[0]) || 0)
-                            : o.supplierAmount ? "$" + fmt(o.supplierAmount) : "—"}
-                        </td>
-                        <td className="py-2 px-2 text-center max-w-[120px] relative" onClick={(e) => e.stopPropagation()}>
-                          {inlineEdit && inlineEdit.id === o.id && inlineEdit.field === "paymentStatusSupplier" ? (
-                            <div className="absolute z-50 top-0 left-0 bg-white rounded-lg shadow-xl border border-gray-200 py-1 min-w-[120px]">
-                              {["Paid", "Not paid"].map((opt) => (
-                                <button key={opt} onClick={() => {
-                                  const exts = parseExternalPOs(o);
-                                  const updatedPayments = exts.map((e) => e.cancelled ? e.payment : opt).join("\n");
-                                  pushLog({ type: "po_inline_edit", id: o.id, field: "paymentStatusSupplier", prev: o.paymentStatusSupplier || "" });
-                                  setData((prev) => prev.map((x) => x.id === o.id ? { ...x, paymentStatusSupplier: updatedPayments } : x));
-                                  setInlineEdit(null);
-                                }}
-                                  className={`w-full text-left px-3 py-1.5 text-xs font-medium hover:bg-gray-100 transition-colors ${opt === "Paid" ? "text-emerald-700" : "text-amber-700"}`}>
-                                  {opt === "Paid" ? "✅ " : "🟡 "}{opt}
-                                </button>
-                              ))}
-                              <button onClick={cancelInlineEdit} className="w-full text-left px-3 py-1.5 text-xs text-gray-400 hover:bg-gray-100 border-t border-gray-100">Отмена</button>
-          </div>
-                          ) : (() => {
-                            if (!payments.length) return <span className="text-gray-400 cursor-pointer text-[10px]" onClick={() => startInlineEdit(o, "paymentStatusSupplier")}>—</span>;
+                        {/* External PO — стиль как Internal PO */}
+                        <td className="py-2 px-2 text-center font-mono text-xs max-w-[140px]">
+                          {(() => {
+                            if (!active.length && !cancelled.length) return <span className="text-gray-400">—</span>;
                             return <div className="space-y-0.5">
-                              {payments.map((p, pi) => {
-                                const paid = p.toLowerCase().includes("paid") && !p.toLowerCase().includes("not paid");
+                              {active.map((ext, i) => <div key={i} className="text-gray-900 truncate text-xs leading-tight">{ext.po || "—"}</div>)}
+                              {cancelled.map((ext, i) => <div key={`c${i}`} className="line-through text-gray-400 truncate text-xs leading-tight">{ext.po}</div>)}
+                            </div>;
+                          })()}
+                        </td>
+                        {/* Поставщик — стиль как Клиент */}
+                        <td className="py-2 px-2 text-center max-w-[140px]">
+                          {!active.length ? <span className="text-gray-400">—</span> :
+                            active.length === 1 ? <span className="text-[#1E3A5F] font-semibold truncate block text-xs">{active[0].supplier || "—"}</span> :
+                            <div className="space-y-0.5">{active.map((e, i) => <div key={i} className="text-[#1E3A5F] font-semibold truncate text-xs leading-tight">{e.supplier || "—"}</div>)}</div>}
+                        </td>
+                        {/* Сумма поставщика */}
+                        <td className="py-2 px-2 text-center text-gray-700 tabular-nums whitespace-nowrap text-xs relative" onClick={(e) => e.stopPropagation()}>
+                          {!active.length ? "—" : isCollapsed ? (
+                            <div>
+                              <div onClick={() => setExpandedAmounts_(!expandedAmounts)}
+                                className="cursor-pointer hover:bg-blue-50 px-1 py-0.5 rounded transition-colors font-medium">
+                                ${fmt(totalAmount)}
+                              </div>
+                              {expandedAmounts && (
+                                <div className="absolute z-50 top-full left-1/2 -translate-x-1/2 mt-1 bg-white rounded-lg shadow-xl border border-gray-200 py-2 px-3 min-w-[200px] text-left">
+                                  <div className="text-[10px] text-gray-400 font-semibold uppercase tracking-wider mb-1.5">Детали по поставщикам</div>
+                                  {active.map((ext, i) => (
+                                    <div key={i} className="flex justify-between items-center py-1 border-b border-gray-50 last:border-0">
+                                      <span className="text-xs text-gray-700 truncate mr-2">{ext.supplier || ext.po || `#${i + 1}`}</span>
+                                      <span className="text-xs font-medium text-gray-900 whitespace-nowrap">${fmt(parseFloat(ext.supplierAmount) || 0)}</span>
+                                    </div>
+                                  ))}
+                                  <div className="flex justify-between items-center pt-1.5 mt-1 border-t border-gray-200">
+                                    <span className="text-xs font-semibold text-gray-500">Итого</span>
+                                    <span className="text-xs font-bold text-gray-900">${fmt(totalAmount)}</span>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="space-y-0.5">
+                              {active.map((e, i) => <div key={i} className="text-xs leading-tight">${fmt(parseFloat(e.supplierAmount) || 0)}</div>)}
+                            </div>
+                          )}
+                        </td>
+                        {/* Статус оплаты поставщику */}
+                        <td className="py-2 px-2 text-center max-w-[120px] relative" onClick={(e) => e.stopPropagation()}>
+                          {!active.length ? <span className="text-gray-400 text-[10px]">—</span> : isCollapsed ? (
+                            <div className="flex items-center justify-center gap-1">
+                              <span className="px-2 py-0.5 rounded text-xs font-medium bg-emerald-100 text-emerald-800">Paid</span>
+                              {o.paymentFileId && (
+                                <a href={api.getFileUrl(o.paymentFileId)} title="Скачать платёжку" onClick={(e) => e.stopPropagation()}
+                                  className="text-blue-500 hover:text-blue-700 text-xs">📎</a>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="space-y-0.5">
+                              {active.map((ext, pi) => {
+                                const paid = ext.payment?.toLowerCase() === "paid";
+                                const isEditing = inlineEdit && inlineEdit.id === o.id && inlineEdit.field === "paymentStatusSupplier" && inlineEdit.extIdx === pi;
+                                if (isEditing) {
+                                  return <div key={pi} className="absolute z-50 top-0 left-0 bg-white rounded-lg shadow-xl border border-gray-200 py-1 min-w-[140px]">
+                                    <div className="px-3 py-1 text-[9px] text-gray-400 border-b border-gray-100 truncate">{ext.po || ext.supplier || `#${pi + 1}`}</div>
+                                    {["Paid", "Not paid"].map((opt) => (
+                                      <button key={opt} onClick={() => {
+                                        pushLog({ type: "po_inline_edit", id: o.id, field: "paymentStatusSupplier", prev: o.paymentStatusSupplier || "" });
+                                        const updated = [...allExts];
+                                        const realIdx = allExts.indexOf(ext);
+                                        updated[realIdx] = { ...updated[realIdx], payment: opt };
+                                        const newVal = updated.map((e) => e.payment).join("\n");
+                                        const datePaidUpdate = opt === "Paid" && !ext.datePaid
+                                          ? (() => { const u2 = [...allExts]; u2[realIdx] = { ...u2[realIdx], datePaid: new Date().toISOString().split("T")[0] }; return u2.map((e) => e.datePaid || "").join("\n"); })()
+                                          : null;
+                                        setData((prev) => prev.map((x) => x.id === o.id ? { ...x, paymentStatusSupplier: newVal, ...(datePaidUpdate ? { datePaidSupplier: datePaidUpdate } : {}) } : x));
+                                        setInlineEdit(null);
+                                      }}
+                                        className={`w-full text-left px-3 py-1.5 text-xs font-medium hover:bg-gray-100 transition-colors ${opt === "Paid" ? "text-emerald-700" : "text-amber-700"}`}>
+                                        {opt === "Paid" ? "✅ " : "🟡 "}{opt}
+                                      </button>
+                                    ))}
+                                    <button onClick={cancelInlineEdit} className="w-full text-left px-3 py-1.5 text-xs text-gray-400 hover:bg-gray-100 border-t border-gray-100">Отмена</button>
+                                  </div>;
+                                }
                                 return <div key={pi} className="flex items-center justify-center gap-1">
-                                  <div onClick={() => startInlineEdit(o, "paymentStatusSupplier")} className={`px-1 py-0.5 rounded text-[9px] font-medium cursor-pointer ${paid ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}>{p}</div>
+                                  <div onClick={() => setInlineEdit({ id: o.id, field: "paymentStatusSupplier", extIdx: pi })}
+                                    className={`px-1 py-0.5 rounded text-[9px] font-medium cursor-pointer ${paid ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}>
+                                    {ext.payment || "—"}
+                                  </div>
                                   {paid && o.paymentFileId && (
                                     <a href={api.getFileUrl(o.paymentFileId)} title="Скачать платёжку" onClick={(e) => e.stopPropagation()}
                                       className="text-blue-500 hover:text-blue-700 text-xs">📎</a>
                                   )}
                                 </div>;
                               })}
-                            </div>;
-                          })()}
-                        </td>
-                        {/* Дата оплаты поставщику */}
-                        <td className="py-2 px-2 text-center text-gray-600 whitespace-nowrap text-xs" onClick={(e) => e.stopPropagation()}>
-                          {inlineEdit && inlineEdit.id === o.id && inlineEdit.field === "datePaidSupplier" ? (
-                            <input type="date" autoFocus value={inlineEdit.value || ""}
-                              onChange={(e) => setInlineEdit({ ...inlineEdit, value: e.target.value })}
-                              onBlur={() => { pushLog({ type: "po_inline_edit", id: o.id, field: "datePaidSupplier", prev: o.datePaidSupplier || "" }); setData((prev) => prev.map((x) => x.id === o.id ? { ...x, datePaidSupplier: inlineEdit.value } : x)); setInlineEdit(null); }}
-                              onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); if (e.key === "Escape") setInlineEdit(null); }}
-                              className="w-24 px-1 py-0.5 border border-blue-400 rounded text-xs text-center" />
-                          ) : (
-                            <span onClick={() => setInlineEdit({ id: o.id, field: "datePaidSupplier", value: o.datePaidSupplier || "" })}
-                              className="cursor-pointer hover:bg-blue-50 px-1 py-0.5 rounded transition-colors">
-                              {o.datePaidSupplier || "—"}
-                            </span>
+                            </div>
                           )}
                         </td>
-                        <td className="py-2 px-2 text-center text-gray-600 text-xs max-w-[80px] truncate">{companies.length > 0 ? companies.join(", ") : "—"}</td>
+                        {/* Дата оплаты поставщику — per-supplier */}
+                        <td className="py-2 px-2 text-center text-gray-600 whitespace-nowrap text-xs" onClick={(e) => e.stopPropagation()}>
+                          {!active.length ? <span className="text-gray-400">—</span> : isCollapsed ? (
+                            <span className="text-xs text-gray-600">{active[0].datePaid || "—"}</span>
+                          ) : (
+                            <div className="space-y-0.5">
+                              {active.map((ext, pi) => {
+                                const isEditing = inlineEdit && inlineEdit.id === o.id && inlineEdit.field === "datePaidSupplier" && inlineEdit.extIdx === pi;
+                                if (isEditing) {
+                                  return <input key={pi} type="date" autoFocus value={inlineEdit.value || ""}
+                                    onChange={(e) => setInlineEdit({ ...inlineEdit, value: e.target.value })}
+                                    onBlur={() => {
+                                      pushLog({ type: "po_inline_edit", id: o.id, field: "datePaidSupplier", prev: o.datePaidSupplier || "" });
+                                      const updated = [...allExts];
+                                      const realIdx = allExts.indexOf(ext);
+                                      updated[realIdx] = { ...updated[realIdx], datePaid: inlineEdit.value };
+                                      setData((prev) => prev.map((x) => x.id === o.id ? { ...x, datePaidSupplier: updated.map((e) => e.datePaid || "").join("\n") } : x));
+                                      setInlineEdit(null);
+                                    }}
+                                    onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); if (e.key === "Escape") setInlineEdit(null); }}
+                                    className="w-24 px-1 py-0.5 border border-blue-400 rounded text-xs text-center" />;
+                                }
+                                return <div key={pi}
+                                  onClick={() => setInlineEdit({ id: o.id, field: "datePaidSupplier", extIdx: pi, value: ext.datePaid || "" })}
+                                  className="cursor-pointer hover:bg-blue-50 px-1 py-0.5 rounded transition-colors text-xs leading-tight">
+                                  {ext.datePaid || "—"}
+                                </div>;
+                              })}
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-2 px-2 text-center text-gray-600 text-xs max-w-[80px] truncate">{companies.length > 0 ? (companies.length === 1 ? companies[0] : companies.filter((v, i, a) => a.indexOf(v) === i).join(", ")) : "—"}</td>
                       </>);
                     })()}
                     <td className="py-2 px-2 text-center text-gray-600 text-xs max-w-[80px] truncate">{parseLogisticsPlan(o.logisticsPlan).plan || "—"}</td>
@@ -2535,7 +2754,11 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                     </td>
                     <td className="py-2 px-2 text-center" onClick={(e) => e.stopPropagation()}>
                       <div className="flex items-center justify-center gap-1">
-                        <button onClick={() => startEdit(o)} className="p-1 hover:bg-gray-200 rounded" title="Редактировать">✏️</button>
+                        {isLockedByOther?.("po", o.id) ? (
+                          <span className="text-xs text-amber-500 cursor-not-allowed p-1" title={`Редактирует: ${getLockUser?.("po", o.id)}`}>🔒</span>
+                        ) : (
+                          <button onClick={() => startEdit(o)} className="p-1 hover:bg-gray-200 rounded" title="Редактировать">✏️</button>
+                        )}
                         <button onClick={() => deleteOrder(o)} className="p-1 hover:bg-red-100 rounded text-red-400 hover:text-red-600" title="Удалить заказ">🗑️</button>
                       </div>
                     </td>
@@ -2711,7 +2934,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
       </Modal>
 
       {/* Модал редактирования */}
-      <Modal isOpen={!!editModal} onClose={() => setEditModal(null)} title={`Редактирование — ${editModal?.internalPo || ""}`} wide>
+      <Modal isOpen={!!editModal} onClose={closeEditModal} title={`Редактирование — ${editModal?.internalPo || ""}`} wide>
         {editModal && (
       <div className="space-y-3">
             <div className="grid grid-cols-2 gap-3">
@@ -2735,7 +2958,6 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                 </select>
               </div>
               <InputField label="Дата оплаты клиента" value={editForm.dateCustomerPaid} onChange={(v) => setEditForm({ ...editForm, dateCustomerPaid: v })} type="date" />
-              <InputField label="Дата оплаты поставщику" value={editForm.datePaidSupplier} onChange={(v) => setEditForm({ ...editForm, datePaidSupplier: v })} type="date" />
             </div>
 
             {/* Блок External PO */}
@@ -2797,6 +3019,10 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                         <option value="Not paid">Not paid</option>
                       </select>
                     </div>
+                    <InputField label="Дата оплаты поставщику" value={ext.datePaid || ""} onChange={(v) => {
+                      const upd = [...editForm.externalOrders]; upd[ei] = { ...upd[ei], datePaid: v };
+                      setEditForm({ ...editForm, externalOrders: upd });
+                    }} type="date" />
                     <div>
                       <label className="text-xs text-slate-400 mb-1 block">Платежная компания</label>
                       <select value={ext.payingCompany} onChange={(e) => {
@@ -2874,7 +3100,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
             </div>
 
             <div className="flex justify-end gap-3 pt-2">
-              <button onClick={() => setEditModal(null)} className="px-4 py-2 text-slate-400 hover:text-white text-sm">Отмена</button>
+              <button onClick={closeEditModal} className="px-4 py-2 text-slate-400 hover:text-white text-sm">Отмена</button>
               <button onClick={saveEdit} className="px-6 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-medium transition-colors">Сохранить</button>
             </div>
           </div>
@@ -2968,6 +3194,10 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                       <option value="Not paid">Not paid</option>
                     </select>
                   </div>
+                  <InputField label="Дата оплаты поставщику" value={ext.datePaid || ""} onChange={(v) => {
+                    const upd = [...newPO.externalOrders]; upd[ei] = { ...upd[ei], datePaid: v };
+                    setNewPO({ ...newPO, externalOrders: upd });
+                  }} type="date" />
                   <div>
                     <label className="text-xs text-slate-400 mb-1 block">Платежная компания</label>
                     <select value={ext.payingCompany} onChange={(e) => {
@@ -3355,10 +3585,92 @@ const Infrastructure = ({ balances, setBalances, pushLog, infraData, setInfraDat
       .finally(() => setRateLoading(false));
   }, [payment.from, payment.to, balances]);
 
+  const [editOpModal, setEditOpModal] = useState(null);
+  const [editOpForm, setEditOpForm] = useState({});
+
   const startEditComment = (op) => { setEditingComment(op.id); setEditCommentVal(op.comment || ""); };
   const saveComment = (opId) => {
     api.updateInfraComment(opId, editCommentVal).catch((e) => console.error("Ошибка сохранения комментария:", e));
     setEditingComment(null);
+  };
+
+  const openEditOp = (op) => {
+    setEditOpForm({
+      poRef: op.poRef || "",
+      description: op.description || "",
+      received: op.received || 0,
+      outgoing: op.outgoing || 0,
+      bankFees: op.bankFees || 0,
+      supplier: op.supplier || "",
+      invoice: op.invoice || "",
+      date: op.date || "",
+      comment: op.comment || "",
+    });
+    setEditOpModal(op);
+  };
+
+  const saveEditOp = async () => {
+    if (!editOpModal) return;
+    const op = editOpModal;
+    const acc = op.accountName || selectedAcc;
+
+    const oldNet = (parseFloat(op.received) || 0) - (parseFloat(op.outgoing) || 0) - (parseFloat(op.bankFees) || 0);
+    const newReceived = parseFloat(editOpForm.received) || 0;
+    const newOutgoing = parseFloat(editOpForm.outgoing) || 0;
+    const newFees = parseFloat(editOpForm.bankFees) || 0;
+    const newNet = newReceived - newOutgoing - newFees;
+    const balanceDelta = newNet - oldNet;
+
+    const updates = {
+      poRef: editOpForm.poRef,
+      description: editOpForm.description,
+      received: newReceived,
+      outgoing: newOutgoing,
+      bankFees: newFees,
+      supplier: editOpForm.supplier,
+      invoice: editOpForm.invoice,
+      date: editOpForm.date,
+      comment: editOpForm.comment,
+    };
+
+    try {
+      await api.updateInfraOp(op.id, updates);
+    } catch (e) {
+      console.error("Ошибка сохранения операции:", e);
+      return;
+    }
+
+    setInfraData((prev) => ({
+      ...prev,
+      [acc]: (prev[acc] || []).map((o) => o.id === op.id ? { ...o, ...updates } : o),
+    }));
+
+    if (balanceDelta !== 0) {
+      setBalances((prev) => prev.map((b) => b.name === acc ? { ...b, balance: b.balance + balanceDelta } : b));
+    }
+
+    setEditOpModal(null);
+  };
+
+  const deleteOp = async (op) => {
+    const acc = op.accountName || selectedAcc;
+    if (!window.confirm(`Удалить операцию${op.poRef ? ` (${op.poRef})` : op.description ? ` (${op.description})` : ""}?`)) return;
+
+    const net = (parseFloat(op.received) || 0) - (parseFloat(op.outgoing) || 0) - (parseFloat(op.bankFees) || 0);
+
+    try {
+      await api.deleteInfraOp(op.id);
+    } catch (e) {
+      console.error("Ошибка удаления операции:", e);
+      return;
+    }
+
+    setInfraData((prev) => ({
+      ...prev,
+      [acc]: (prev[acc] || []).filter((o) => o.id !== op.id),
+    }));
+
+    setBalances((prev) => prev.map((b) => b.name === acc ? { ...b, balance: b.balance - net } : b));
   };
 
   const isInternalTransfer = (fromName, toName) => {
@@ -3925,6 +4237,7 @@ const Infrastructure = ({ balances, setBalances, pushLog, infraData, setInfraDat
                     <th className="py-2.5 px-3 font-semibold">Дата</th>
                     <th className="py-2.5 px-3 font-semibold">Остаток</th>
                     <th className="py-2.5 px-3 font-semibold">Комментарий</th>
+                    <th className="py-2.5 px-3 font-semibold w-[70px]"></th>
                   </tr>
                 </thead>
                 <tbody className="bg-white">
@@ -3959,6 +4272,12 @@ const Infrastructure = ({ balances, setBalances, pushLog, infraData, setInfraDat
                           </span>
                         )}
                       </td>
+                      <td className="py-2 px-2 text-center">
+                        <div className="flex items-center justify-center gap-1">
+                          <button onClick={() => openEditOp(op)} className="p-1 hover:bg-gray-200 rounded text-xs" title="Редактировать">✏️</button>
+                          <button onClick={() => deleteOp(op)} className="p-1 hover:bg-red-100 rounded text-red-400 hover:text-red-600 text-xs" title="Удалить">🗑️</button>
+                        </div>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -3972,6 +4291,68 @@ const Infrastructure = ({ balances, setBalances, pushLog, infraData, setInfraDat
           </div>
         </div>
       )}
+
+      <Modal isOpen={!!editOpModal} onClose={() => setEditOpModal(null)} title={`Редактирование операции${editOpModal?.poRef ? ` — ${editOpModal.poRef}` : ""}`} wide>
+        {editOpModal && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="text-xs text-slate-400 mb-1 block">PO / Ref</label>
+                <input value={editOpForm.poRef} onChange={(e) => setEditOpForm({ ...editOpForm, poRef: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white" />
+              </div>
+              <div>
+                <label className="text-xs text-slate-400 mb-1 block">Описание</label>
+                <input value={editOpForm.description} onChange={(e) => setEditOpForm({ ...editOpForm, description: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white" />
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-4">
+              <div>
+                <label className="text-xs text-slate-400 mb-1 block">Приход</label>
+                <input type="number" step="0.01" value={editOpForm.received} onChange={(e) => setEditOpForm({ ...editOpForm, received: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white" />
+              </div>
+              <div>
+                <label className="text-xs text-slate-400 mb-1 block">Расход</label>
+                <input type="number" step="0.01" value={editOpForm.outgoing} onChange={(e) => setEditOpForm({ ...editOpForm, outgoing: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white" />
+              </div>
+              <div>
+                <label className="text-xs text-slate-400 mb-1 block">Комиссии</label>
+                <input type="number" step="0.01" value={editOpForm.bankFees} onChange={(e) => setEditOpForm({ ...editOpForm, bankFees: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white" />
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-4">
+              <div>
+                <label className="text-xs text-slate-400 mb-1 block">Поставщик</label>
+                <input value={editOpForm.supplier} onChange={(e) => setEditOpForm({ ...editOpForm, supplier: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white" />
+              </div>
+              <div>
+                <label className="text-xs text-slate-400 mb-1 block">Инвойс</label>
+                <input value={editOpForm.invoice} onChange={(e) => setEditOpForm({ ...editOpForm, invoice: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white" />
+              </div>
+              <div>
+                <label className="text-xs text-slate-400 mb-1 block">Дата</label>
+                <input type="date" value={editOpForm.date} onChange={(e) => setEditOpForm({ ...editOpForm, date: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white" />
+              </div>
+            </div>
+            <div>
+              <label className="text-xs text-slate-400 mb-1 block">Комментарий</label>
+              <textarea value={editOpForm.comment} onChange={(e) => setEditOpForm({ ...editOpForm, comment: e.target.value })}
+                className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white resize-y" rows={2} />
+            </div>
+            <div className="flex justify-end gap-3 pt-2">
+              <button onClick={() => setEditOpModal(null)} className="px-4 py-2 text-slate-400 hover:text-white text-sm">Отмена</button>
+              <button onClick={saveEditOp} className="px-6 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-medium transition-colors">Сохранить</button>
+            </div>
+          </div>
+        )}
+      </Modal>
 
       <Modal isOpen={showPayment} onClose={() => setShowPayment(false)} title="Провести перевод">
         <div className="space-y-4">
@@ -4039,8 +4420,8 @@ const Infrastructure = ({ balances, setBalances, pushLog, infraData, setInfraDat
 };
 
 // ==================== ИМПОРТ БАНКОВСКИХ ПЛАТЕЖЕЙ ====================
-const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setInfraData, pushLog, finResults, setFinResults }) => {
-  const [mode, setMode] = useState("foreign");
+const BankImport = ({ balances, setBalances, openPo, setOpenPo, finResults, setFinResults, infraData, setInfraData, debts, setDebts, pushLog }) => {
+  const [documentKind, setDocumentKind] = useState("foreign");
   const [step, setStep] = useState(0);
   const [file, setFile] = useState(null);
   const [dragOver, setDragOver] = useState(false);
@@ -4061,8 +4442,14 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
   const [ruFinMatches, setRuFinMatches] = useState([]);
   const [selectedRuPoIds, setSelectedRuPoIds] = useState(new Set());
   const [selectedRuFinIds, setSelectedRuFinIds] = useState(new Set());
+  const [finMatches, setFinMatches] = useState([]);
+  const [selectedFin, setSelectedFin] = useState(null);
+  const [crossCheckHint, setCrossCheckHint] = useState(null);
+  const crossCheckTimer = useRef(null);
 
+  const isForeign = documentKind === "foreign";
   const fmt = (n) => n?.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) || "0.00";
+  const fmtRub = (n) => n?.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) || "0,00";
 
   const reset = () => {
     setStep(0); setFile(null); setLoading(false); setError("");
@@ -4071,6 +4458,8 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
     setAiReasoning(""); setAiConfidence("");
     setRuPoMatches([]); setRuFinMatches([]);
     setSelectedRuPoIds(new Set()); setSelectedRuFinIds(new Set());
+    setFinMatches([]); setSelectedFin(null);
+    setCrossCheckHint(null);
   };
 
   const handleFile = (f) => {
@@ -4081,16 +4470,22 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
       return;
     }
     setFile(f); setError(""); setStep(0);
-    setParsed(null); setEditParsed(null); setMatches([]);
+    setParsed(null); setEditParsed(null); setMatches([]); setFinMatches([]);
     setSelectedPo(null); setAiReasoning(""); setAiConfidence("");
-    setResult(null);
+    setSelectedFin(null); setResult(null);
+  };
+
+  const switchDocumentKind = (kind) => {
+    if (kind === documentKind) return;
+    setDocumentKind(kind);
+    reset();
   };
 
   const handleUploadAndParse = async () => {
     if (!file) return;
     setLoading(true); setError("");
     try {
-      if (mode === "ru") {
+      if (!isForeign) {
         const res = await api.parsePaymentRF(file);
         setParsed(res.parsed);
         setEditParsed({ ...res.parsed });
@@ -4114,16 +4509,21 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
     setLoading(true); setError("");
     try {
       const res = await api.matchPayment({
+        documentKind,
         beneficiary: editParsed.beneficiary,
         amount: editParsed.amount,
         currency: editParsed.currency,
         reference: editParsed.reference,
         payer: editParsed.payer,
+        updNumber: editParsed.updNumber,
+        purpose: editParsed.purpose,
       });
       setMatches(res.matches || []);
+      setFinMatches(res.finMatches || []);
       setAiReasoning(res.aiReasoning || "");
       setAiConfidence(res.aiConfidence || "none");
-      if (res.matches?.length === 1) setSelectedPo(res.matches[0]);
+      setSelectedPo(res.matches?.length === 1 ? res.matches[0] : null);
+      setSelectedFin(res.finMatches?.length === 1 ? res.finMatches[0] : null);
       setStep(2);
     } catch (err) {
       setError(err.message || "Ошибка поиска");
@@ -4136,11 +4536,11 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
     setApplying(true); setError("");
     try {
       let paymentFileId = null;
-      const uploaded = await api.uploadFile(file, "payments", selectedPo?.id);
+      const uploaded = await api.uploadFile(file, "payments", selectedFin?.id || selectedPo?.id);
       paymentFileId = uploaded.id;
 
-      const acc = balances.find((b) => b.name === selectedAccount);
-      const applyData = {
+      const applyData = isForeign ? {
+        documentKind,
         poId: selectedPo?.id || null,
         paymentFileId,
         datePaid: editParsed.date,
@@ -4151,40 +4551,104 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
         poRef: editParsed.reference || selectedPo?.internalPoRef || "",
         date: editParsed.date,
         parsedData: editParsed,
+      } : {
+        documentKind,
+        poId: selectedPo?.id || null,
+        finId: selectedFin?.id || null,
+        paymentFileId,
+        datePaid: editParsed.date,
+        amount: editParsed.amount,
+        payer: editParsed.payer,
+        beneficiary: editParsed.beneficiary,
+        reference: editParsed.reference,
+        updNumber: editParsed.updNumber,
+        purpose: editParsed.purpose,
+        parsedData: editParsed,
       };
 
       const res = await api.applyImport(applyData);
 
-      const undoData = {
+      const prevPoState = selectedPo ? (isForeign ? {
+        paymentStatusSupplier: selectedPo.paymentStatusSupplier || "Not paid",
+        datePaidSupplier: selectedPo.datePaidSupplier || "",
+        paymentFileId: selectedPo.paymentFileId || null,
+      } : {
+        paymentStatusCustomer: selectedPo.paymentStatusCustomer || "",
+        dateCustomerPaid: selectedPo.dateCustomerPaid || "",
+        customerPaymentFileId: selectedPo.customerPaymentFileId || null,
+      }) : null;
+
+      const prevFinState = !isForeign && selectedFin ? {
+        paymentFact: parseFloat(selectedFin.paymentFact) || 0,
+        paymentDate: selectedFin.paymentDate || "",
+        paymentDocFileId: selectedFin.paymentDocFileId || null,
+        status: selectedFin.status || "active",
+      } : null;
+
+      pushLog({
+        type: "import_apply",
+        documentKind,
         poId: selectedPo?.id || null,
-        prevPaymentStatus: res.prevPoPaymentStatus || "Not paid",
-        prevDatePaid: res.prevPoDatePaid || "",
-        prevPaymentFileId: res.prevPoPaymentFileId || null,
-        infraAccount: selectedAccount || null,
+        poPaymentSide: isForeign ? "supplier" : "customer",
+        prevPoState,
+        finId: selectedFin?.id || null,
+        prevFinState,
+        prevDebtsState: res.prevDebts || [],
+        infraAccount: isForeign ? (selectedAccount || null) : null,
         infraOpId: res.infraOpId || null,
         prevBalance: res.prevBalance ?? null,
         importHistoryId: res.importHistoryId || null,
-        paymentFileId,
-      };
+      });
 
       if (res.poUpdated && selectedPo) {
-        pushLog({
-          type: "import_apply",
-          ...undoData,
-          prevPoState: {
-            paymentStatusSupplier: selectedPo.paymentStatusSupplier || "Not paid",
-            datePaidSupplier: selectedPo.datePaidSupplier || "",
-            paymentFileId: selectedPo.paymentFileId || null,
-          },
-        });
-        setOpenPo((prev) => prev.map((po) =>
-          po.id === selectedPo.id ? { ...po, paymentStatusSupplier: "Paid", datePaidSupplier: editParsed.date, paymentFileId } : po
-        ));
-      } else {
-        pushLog({ type: "import_apply", ...undoData });
+        setOpenPo((prev) => prev.map((po) => {
+          if (po.id !== selectedPo.id) return po;
+          if (isForeign) {
+            const exts = parseExternalPOs(po);
+            const ref = (editParsed.reference || "").trim();
+            const matchIdx = ref ? exts.findIndex((e) => !e.cancelled && e.po === ref) : -1;
+            const updExts = exts.map((e, i) => {
+              if (e.cancelled) return e;
+              if (matchIdx >= 0 ? i === matchIdx : true) {
+                return { ...e, payment: "Paid", datePaid: e.datePaid || editParsed.date };
+              }
+              return e;
+            });
+            return {
+              ...po,
+              paymentStatusSupplier: updExts.map((e) => e.payment).join("\n"),
+              datePaidSupplier: updExts.map((e) => e.datePaid || "").join("\n"),
+              paymentFileId,
+            };
+          }
+          return { ...po, paymentStatusCustomer: "Paid", dateCustomerPaid: editParsed.date, customerPaymentFileId: paymentFileId };
+        }));
       }
 
-      if (res.infraOpCreated && selectedAccount) {
+      if (res.finUpdated && selectedFin) {
+        setFinResults((prev) => prev.map((fr) =>
+          fr.id === selectedFin.id
+            ? {
+                ...fr,
+                paymentFact: parseFloat(editParsed.amount) || 0,
+                paymentDate: editParsed.date,
+                paymentDocFileId: paymentFileId,
+                status: res.newFinStatus || fr.status,
+              }
+            : fr
+        ));
+      }
+
+      if (res.updatedDebtIds?.length) {
+        const payComment = `Оплачено через Импорт платежей РФ: ₽${fmtRub(parseFloat(editParsed.amount) || 0)}`;
+        setDebts((prev) => prev.map((d) =>
+          res.updatedDebtIds.includes(d.id)
+            ? { ...d, status: "closed", payDocFileId: paymentFileId, payDate: editParsed.date, payComment }
+            : d
+        ));
+      }
+
+      if (isForeign && res.infraOpCreated && selectedAccount) {
         setBalances((prev) => prev.map((b) => b.name === selectedAccount ? { ...b, balance: res.newBalance } : b));
 
         const poRef = editParsed.reference || selectedPo?.internalPoRef || "";
@@ -4285,34 +4749,61 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
   const toggleRuPoId = (id) => setSelectedRuPoIds((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const toggleRuFinId = (id) => setSelectedRuFinIds((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
-  const fmtRub = (n) => {
-    if (!n) return "0,00";
-    return parseFloat(n).toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  };
+  const doCrossCheck = useCallback((field, value) => {
+    if (isForeign || !value || value.length < 2) { setCrossCheckHint(null); return; }
+    clearTimeout(crossCheckTimer.current);
+    crossCheckTimer.current = setTimeout(() => {
+      const needle = value.trim().toLowerCase();
+      if (field === "updNumber") {
+        const hit = finResults.find((f) => f.status !== "cancelled" && (f.updNum || "").toLowerCase() === needle);
+        if (hit) {
+          const poHit = openPo.find((p) => p.status !== "cancelled" && p.internalPo === hit.customerPo);
+          setCrossCheckHint({ type: "upd", fin: hit, po: poHit || null });
+        } else { setCrossCheckHint(null); }
+      } else if (field === "reference") {
+        const poHit = openPo.find((p) => p.status !== "cancelled" && p.internalPo?.toLowerCase().includes(needle));
+        const finHit = finResults.find((f) => f.status !== "cancelled" && f.customerPo?.toLowerCase().includes(needle));
+        if (poHit || finHit) {
+          setCrossCheckHint({ type: "ref", po: poHit || null, fin: finHit || null });
+        } else { setCrossCheckHint(null); }
+      }
+    }, 300);
+  }, [isForeign, finResults, openPo]);
 
-  const EditField = ({ label, field, type }) => (
+  const renderField = (label, field, type) => (
     <div>
       <label className="text-xs text-gray-500 font-medium mb-1 block">{label}</label>
-      <input type={type || "text"} value={editParsed[field] ?? ""} onChange={(e) => setEditParsed({ ...editParsed, [field]: type === "number" ? parseFloat(e.target.value) || 0 : e.target.value })}
-        className="w-full px-3 py-2 bg-gray-50 border border-gray-300 rounded-lg text-sm text-gray-900 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" />
+      <input type={type || "text"} value={editParsed?.[field] ?? ""}
+        onChange={(e) => {
+          const val = type === "number" ? parseFloat(e.target.value) || 0 : e.target.value;
+          setEditParsed((prev) => ({ ...prev, [field]: val }));
+          if (field === "updNumber" || field === "reference") doCrossCheck(field, e.target.value);
+        }}
+        className="w-full px-3 py-2 bg-gray-50 border border-gray-300 rounded-lg text-sm text-gray-900 focus:outline-none focus:border-[#1E3A5F] focus:ring-1 focus:ring-[#1E3A5F]/35" />
     </div>
   );
+
+  const previewFinStatus = selectedFin
+    ? (selectedFin.status !== "cancelled" && (selectedFin.hasUpd || selectedFin.noGlobalSmart) && (parseFloat(editParsed?.amount) || 0) > 0
+      ? "completed"
+      : selectedFin.status)
+    : "";
 
   return (
     <div className="space-y-6">
       {/* Переключатель режимов */}
       <div className="flex border-2 border-[#1E3A5F]/20 rounded-xl overflow-hidden">
-        <button onClick={() => { if (mode !== "ru") { reset(); setMode("ru"); } }}
+        <button onClick={() => switchDocumentKind("rf")}
           className={`flex-1 py-3.5 px-6 text-sm font-semibold transition-all flex items-center justify-center gap-2.5 ${
-            mode === "ru"
+            !isForeign
               ? "bg-[#1E3A5F] text-white border-r border-[#1E3A5F]"
               : "bg-white text-gray-500 hover:bg-gray-50 border-r border-[#1E3A5F]/20"
           }`}>
           <span className="text-lg">🇷🇺</span> Платёжный документ РФ
         </button>
-        <button onClick={() => { if (mode !== "foreign") { reset(); setMode("foreign"); } }}
+        <button onClick={() => switchDocumentKind("foreign")}
           className={`flex-1 py-3.5 px-6 text-sm font-semibold transition-all flex items-center justify-center gap-2.5 ${
-            mode === "foreign"
+            isForeign
               ? "bg-[#1E3A5F] text-white"
               : "bg-white text-gray-500 hover:bg-gray-50"
           }`}>
@@ -4338,11 +4829,11 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
         <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6">
           <h3 className="text-[#1E3A5F] font-semibold text-base mb-4 flex items-center gap-2">
             <span className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center text-lg">📄</span>
-            {mode === "ru" ? "Загрузите платёжный документ РФ" : "Загрузите платёжный документ"}
+            {!isForeign ? "Загрузите платёжный документ РФ" : "Загрузите платёжный документ"}
           </h3>
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-5 text-sm text-blue-800">
+          <div className="bg-[#1E3A5F]/06 border border-[#1E3A5F]/20 rounded-lg p-4 mb-5 text-sm text-[#1E3A5F]">
             <p>Поддерживаемые форматы: <strong>PDF, JPEG, PNG, CSV</strong></p>
-            <p className="mt-1">{mode === "ru"
+            <p className="mt-1">{!isForeign
               ? "Система распознает реквизиты платёжного поручения РФ и ищет заказ по договору, УПД и плательщику"
               : "AI автоматически распознает данные из документа любого банка"
             }</p>
@@ -4354,7 +4845,7 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
             onDrop={(e) => { e.preventDefault(); setDragOver(false); handleFile(e.dataTransfer.files[0]); }}
             onClick={() => document.getElementById("import-file-input").click()}
             className={`border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-colors ${
-              dragOver ? "border-blue-500 bg-blue-50" : file ? "border-emerald-400 bg-emerald-50" : "border-gray-300 hover:border-blue-400 hover:bg-blue-50/30"
+              dragOver ? "border-[#1E3A5F] bg-[#1E3A5F]/08" : file ? "border-emerald-400 bg-emerald-50" : "border-gray-300 hover:border-[#1E3A5F]/45 hover:bg-[#1E3A5F]/05"
             }`}
           >
             <input id="import-file-input" type="file" accept=".pdf,.jpg,.jpeg,.png,.csv" onChange={(e) => handleFile(e.target.files[0])} className="hidden" />
@@ -4363,7 +4854,7 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
                 <div className="text-3xl mb-2">✅</div>
                 <p className="text-gray-900 font-medium">{file.name}</p>
                 <p className="text-xs text-gray-500 mt-1">{(file.size / 1024).toFixed(1)} КБ</p>
-                <p className="text-xs text-blue-600 mt-2 hover:underline">Нажмите, чтобы заменить</p>
+                <p className="text-xs text-[#1E3A5F] mt-2 hover:underline">Нажмите, чтобы заменить</p>
               </div>
             ) : (
               <div>
@@ -4396,27 +4887,43 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
           </h3>
           <p className="text-sm text-gray-500 mb-4">Проверьте и при необходимости исправьте</p>
 
-          {mode === "foreign" ? (
+          {isForeign ? (
             <div className="grid grid-cols-2 gap-4">
-              <EditField label="Плательщик" field="payer" />
-              <EditField label="Получатель (поставщик)" field="beneficiary" />
-              <EditField label="Сумма" field="amount" type="number" />
-              <EditField label="Валюта" field="currency" />
-              <EditField label="Комиссия банка" field="fees" type="number" />
-              <EditField label="Дата платежа" field="date" type="date" />
-              <EditField label="Референс / номер ПО" field="reference" />
-              <EditField label="Банк" field="bankName" />
+              {renderField("Плательщик", "payer")}
+              {renderField("Получатель (поставщик)", "beneficiary")}
+              {renderField("Сумма", "amount", "number")}
+              {renderField("Валюта", "currency")}
+              {renderField("Комиссия банка", "fees", "number")}
+              {renderField("Дата платежа", "date", "date")}
+              {renderField("Референс / номер ПО", "reference")}
+              {renderField("Банк", "bankName")}
             </div>
           ) : (
             <div className="grid grid-cols-2 gap-4">
-              <EditField label="Плательщик (клиент)" field="payer" />
-              <EditField label="Получатель" field="beneficiary" />
-              <EditField label="Сумма (₽)" field="amount" type="number" />
-              <EditField label="Валюта" field="currency" />
-              <EditField label="Дата платежа" field="date" type="date" />
-              <EditField label="Номер договора / референс" field="reference" />
-              <EditField label="Банк плательщика" field="bankName" />
-              <EditField label="Номер п/п" field="paymentNumber" />
+              {renderField("Плательщик (клиент)", "payer")}
+              {renderField("Получатель", "beneficiary")}
+              {renderField("Сумма (₽)", "amount", "number")}
+              {renderField("Валюта", "currency")}
+              {renderField("Номер УПД", "updNumber")}
+              {renderField("Дата платежа", "date", "date")}
+              {renderField("Номер договора / референс", "reference")}
+              {renderField("Банк плательщика", "bankName")}
+              {renderField("Назначение платежа", "purpose")}
+            </div>
+          )}
+
+          {!isForeign && crossCheckHint && (
+            <div className="mt-4 p-3 bg-emerald-50 border border-emerald-200 rounded-lg">
+              <p className="text-sm font-semibold text-emerald-800 mb-1">
+                {crossCheckHint.type === "upd" ? "Найдено по УПД" : "Найдено по номеру заказа"}
+              </p>
+              {crossCheckHint.po && (
+                <p className="text-xs text-emerald-700">Open PO: <strong>{crossCheckHint.po.internalPo}</strong> — {crossCheckHint.po.customer}</p>
+              )}
+              {crossCheckHint.fin && (
+                <p className="text-xs text-emerald-700">Фин. результат: <strong>{crossCheckHint.fin.customerPo}</strong> — {crossCheckHint.fin.customer}{crossCheckHint.fin.updNum ? ` (УПД ${crossCheckHint.fin.updNum})` : ""}</p>
+              )}
+              <p className="text-[11px] text-emerald-600 mt-1">Совпадение будет автоматически подставлено при переходе на следующий шаг</p>
             </div>
           )}
 
@@ -4426,18 +4933,18 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
             <button onClick={reset} className="px-5 py-2.5 text-gray-600 hover:text-gray-900 text-sm transition-colors">
               ← Назад
             </button>
-            <button onClick={mode === "foreign" ? handleMatch : handleMatchRu} disabled={loading}
+            <button onClick={isForeign ? handleMatch : handleMatchRu} disabled={loading}
               className="px-6 py-2.5 bg-[#1E3A5F] hover:bg-[#2A4A6F] disabled:opacity-40 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2">
               {loading ? (
                 <><svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg> Поиск...</>
-              ) : mode === "foreign" ? "Найти совпадения в Open PO" : "Найти совпадения в Open PO и Фин. результате"}
+              ) : isForeign ? "Найти совпадения в Open PO" : "Найти совпадения в Open PO и Фин. результате"}
             </button>
           </div>
         </div>
       )}
 
       {/* ШАГ 2 — Сопоставление */}
-      {step === 2 && mode === "foreign" && (
+      {step === 2 && isForeign && (
         <div className="space-y-5">
           <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6">
             <h3 className="text-[#1E3A5F] font-semibold text-base mb-3 flex items-center gap-2">
@@ -4477,9 +4984,9 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
                       const sel = selectedPo?.id === m.id;
                       return (
                         <tr key={m.id} onClick={() => setSelectedPo(sel ? null : m)}
-                          className={`border-b border-gray-200 cursor-pointer transition-colors ${sel ? "bg-blue-50 ring-1 ring-blue-400" : "hover:bg-gray-50"}`}>
+                          className={`border-b border-gray-200 cursor-pointer transition-colors ${sel ? "bg-[#1E3A5F]/08 ring-1 ring-[#1E3A5F]/35" : "hover:bg-gray-50"}`}>
                           <td className="py-2.5 px-3 text-center">
-                            <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${sel ? "border-blue-500 bg-blue-500" : "border-gray-300"}`}>
+                            <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${sel ? "border-[#1E3A5F] bg-[#1E3A5F]" : "border-gray-300"}`}>
                               {sel && <span className="text-white text-xs">✓</span>}
                             </div>
                           </td>
@@ -4508,37 +5015,100 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
             )}
           </div>
 
-          <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6">
-            <h3 className="text-[#1E3A5F] font-semibold text-base mb-4">Счёт списания</h3>
-            <select value={selectedAccount} onChange={(e) => setSelectedAccount(e.target.value)}
-              className="w-full px-3 py-2.5 bg-gray-50 border border-gray-300 rounded-lg text-sm text-gray-900 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
-              <option value="">— Не выбран —</option>
-              {balances.filter((b) => !b.name.includes("Сейф") && !b.name.includes("Crypto")).map((b) => (
-                <option key={b.name} value={b.name}>{b.name} ({b.currency}) — баланс: {fmt(parseFloat(b.balance) || 0)}</option>
-              ))}
-            </select>
-            {suggestedAccount && suggestedAccount !== selectedAccount && (
-              <p className="text-xs text-blue-600 mt-2 cursor-pointer hover:underline" onClick={() => setSelectedAccount(suggestedAccount)}>
-                Предложение AI: {suggestedAccount}
-              </p>
-            )}
-          </div>
+          {!isForeign && (
+            <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6">
+              <h3 className="text-[#1E3A5F] font-semibold text-base mb-3 flex items-center gap-2">
+                <span className="w-8 h-8 bg-violet-100 rounded-lg flex items-center justify-center text-lg">📊</span>
+                Совпадения в Фин. результате
+              </h3>
+              {finMatches.length > 0 ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="bg-[#1E3A5F] text-white text-center text-xs uppercase">
+                        <th className="py-2.5 px-3 font-semibold w-10"></th>
+                        <th className="py-2.5 px-3 font-semibold">Заказ</th>
+                        <th className="py-2.5 px-3 font-semibold">Клиент</th>
+                        <th className="py-2.5 px-3 font-semibold">Оплата факт</th>
+                        <th className="py-2.5 px-3 font-semibold">Статус</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {finMatches.map((m) => {
+                        const sel = selectedFin?.id === m.id;
+                        return (
+                          <tr key={m.id} onClick={() => setSelectedFin(sel ? null : m)}
+                            className={`border-b border-gray-200 cursor-pointer transition-colors ${sel ? "bg-[#1E3A5F]/08 ring-1 ring-[#1E3A5F]/35" : "hover:bg-gray-50"}`}>
+                            <td className="py-2.5 px-3 text-center">
+                              <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${sel ? "border-[#1E3A5F] bg-[#1E3A5F]" : "border-gray-300"}`}>
+                                {sel && <span className="text-white text-xs">✓</span>}
+                              </div>
+                            </td>
+                            <td className="py-2.5 px-3 text-center text-xs font-medium text-gray-900">{m.customerPo}</td>
+                            <td className="py-2.5 px-3 text-center text-xs text-gray-700">{m.customer}</td>
+                            <td className="py-2.5 px-3 text-center text-xs text-gray-700">{m.paymentFact > 0 ? `₽${fmtRub(parseFloat(m.paymentFact) || 0)}` : "—"}</td>
+                            <td className="py-2.5 px-3 text-center text-xs text-gray-700">{m.status || "active"}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="text-center py-8 text-gray-400">
+                  <div className="text-3xl mb-2">📘</div>
+                  <p>Совпадений в Фин. результате не найдено</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {isForeign && (
+            <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6">
+              <h3 className="text-[#1E3A5F] font-semibold text-base mb-4">Счёт списания</h3>
+              <select value={selectedAccount} onChange={(e) => setSelectedAccount(e.target.value)}
+                className="w-full px-3 py-2.5 bg-gray-50 border border-gray-300 rounded-lg text-sm text-gray-900 focus:outline-none focus:border-[#1E3A5F] focus:ring-1 focus:ring-[#1E3A5F]/35">
+                <option value="">— Не выбран —</option>
+                {balances.filter((b) => !b.name.includes("Сейф") && !b.name.includes("Crypto")).map((b) => (
+                  <option key={b.name} value={b.name}>{b.name} ({b.currency}) — баланс: {fmt(parseFloat(b.balance) || 0)}</option>
+                ))}
+              </select>
+              {suggestedAccount && suggestedAccount !== selectedAccount && (
+                <p className="text-xs text-[#1E3A5F] mt-2 cursor-pointer hover:underline" onClick={() => setSelectedAccount(suggestedAccount)}>
+                  Предложение AI: {suggestedAccount}
+                </p>
+              )}
+            </div>
+          )}
 
           <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6">
             <h3 className="text-[#1E3A5F] font-semibold text-base mb-4">Предпросмотр изменений</h3>
             <div className="space-y-3 text-sm">
               {selectedPo && (
-                <div className="flex items-start gap-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-                  <span className="text-blue-600 font-bold text-lg mt-0.5">📦</span>
+                <div className="flex items-start gap-3 p-3 bg-[#1E3A5F]/08 border border-[#1E3A5F]/22 rounded-lg">
+                  <span className="text-[#1E3A5F] font-bold text-lg mt-0.5">📦</span>
                   <div>
-                    <p className="text-blue-900 font-medium">Open PO: {selectedPo.internalPo}</p>
-                    <p className="text-blue-700 text-xs">Статус оплаты → <strong>Paid</strong></p>
-                    <p className="text-blue-700 text-xs">Дата оплаты → <strong>{editParsed.date}</strong></p>
-                    <p className="text-blue-700 text-xs">Файл платёжки → будет прикреплён</p>
+                    <p className="text-[#1E3A5F] font-medium">Open PO: {selectedPo.internalPo}</p>
+                    <p className="text-[#1E3A5F]/85 text-xs">
+                      {isForeign ? <>Статус оплаты поставщику → <strong>Paid</strong></> : <>Статус оплаты клиента → <strong>Paid</strong></>}
+                    </p>
+                    <p className="text-[#1E3A5F]/85 text-xs">Дата оплаты → <strong>{editParsed.date}</strong></p>
+                    <p className="text-[#1E3A5F]/85 text-xs">Файл платёжки → будет прикреплён</p>
                   </div>
                 </div>
               )}
-              {selectedAccount && (
+              {!isForeign && selectedFin && (
+                <div className="flex items-start gap-3 p-3 bg-violet-50 border border-violet-200 rounded-lg">
+                  <span className="text-violet-600 font-bold text-lg mt-0.5">💰</span>
+                  <div>
+                    <p className="text-violet-900 font-medium">Фин. результат: {selectedFin.customerPo}</p>
+                    <p className="text-violet-700 text-xs">Оплата факт → <strong>₽{fmtRub(parseFloat(editParsed.amount) || 0)}</strong></p>
+                    <p className="text-violet-700 text-xs">Дата оплаты → <strong>{editParsed.date}</strong></p>
+                    <p className="text-violet-700 text-xs">Статус после импорта → <strong>{previewFinStatus || "active"}</strong></p>
+                  </div>
+                </div>
+              )}
+              {isForeign && selectedAccount && (
                 <div className="flex items-start gap-3 p-3 bg-emerald-50 border border-emerald-200 rounded-lg">
                   <span className="text-emerald-600 font-bold text-lg mt-0.5">🏦</span>
                   <div>
@@ -4549,14 +5119,16 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
                   </div>
                 </div>
               )}
-              {!selectedPo && !selectedAccount && (
-                <p className="text-gray-400 text-center py-4">Выберите PO и/или счёт списания</p>
+              {((isForeign && !selectedPo && !selectedAccount) || (!isForeign && !selectedPo && !selectedFin)) && (
+                <p className="text-gray-400 text-center py-4">
+                  {isForeign ? "Выберите PO и/или счёт списания" : "Выберите совпадение в Open PO и/или Фин. результате"}
+                </p>
               )}
             </div>
             {error && <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>}
             <div className="flex justify-between mt-5">
               <button onClick={() => setStep(1)} className="px-5 py-2.5 text-gray-600 hover:text-gray-900 text-sm transition-colors">← Назад</button>
-              <button onClick={handleApply} disabled={applying || (!selectedPo && !selectedAccount)}
+              <button onClick={handleApply} disabled={applying || (isForeign ? (!selectedPo && !selectedAccount) : (!selectedPo && !selectedFin))}
                 className="px-6 py-2.5 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2">
                 {applying ? (<><svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg> Применяю...</>) : "Применить"}
               </button>
@@ -4566,7 +5138,7 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
       )}
 
       {/* ШАГ 2 — Сопоставление (РФ) */}
-      {step === 2 && mode === "ru" && (
+      {step === 2 && !isForeign && (
         <div className="space-y-5">
           <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6">
             <h3 className="text-[#1E3A5F] font-semibold text-base mb-3 flex items-center gap-2">
@@ -4726,10 +5298,12 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
           <div className="text-5xl mb-4">✅</div>
           <h3 className="text-[#1E3A5F] font-semibold text-xl mb-3">Платёж успешно импортирован</h3>
           <div className="space-y-2 text-sm text-gray-600 mb-6">
-            {mode === "foreign" && result.poUpdated && <p>Open PO обновлён — статус оплаты поставщику: <strong className="text-emerald-600">Paid</strong></p>}
-            {mode === "foreign" && result.infraOpCreated && <p>Операция записана в <strong>{selectedAccount}</strong> — новый баланс: <strong className="text-blue-600">${fmt(result.newBalance)}</strong></p>}
-            {mode === "ru" && result.poUpdated?.length > 0 && <p>Open PO ({result.poUpdated.length} шт.) — статус оплаты клиента: <strong className="text-emerald-600">Paid</strong></p>}
-            {mode === "ru" && result.finUpdated?.length > 0 && <p>Фин. результат ({result.finUpdated.length} шт.) — оплата факт: <strong className="text-emerald-600">₽{fmtRub(editParsed?.amount)}</strong></p>}
+            {isForeign && result.poUpdated && <p>Open PO обновлён — статус оплаты поставщику: <strong className="text-emerald-600">Paid</strong></p>}
+            {isForeign && result.infraOpCreated && <p>Операция записана в <strong>{selectedAccount}</strong> — новый баланс: <strong className="text-blue-600">${fmt(result.newBalance)}</strong></p>}
+            {!isForeign && result.poUpdated?.length > 0 && <p>Open PO ({result.poUpdated.length} шт.) — статус оплаты клиента: <strong className="text-emerald-600">Paid</strong></p>}
+            {!isForeign && result.finUpdated?.length > 0 && <p>Фин. результат ({result.finUpdated.length} шт.) — оплата факт: <strong className="text-emerald-600">₽{fmtRub(editParsed?.amount)}</strong></p>}
+            {result.finUpdated && result.newFinStatus && <p>Статус в Фин. результате: <strong className="text-[#1E3A5F]">{result.newFinStatus}</strong></p>}
+            {result.updatedDebtIds?.length > 0 && <p>Связанные записи в дебиторке закрыты автоматически</p>}
           </div>
           <button onClick={reset} className="px-6 py-2.5 bg-[#1E3A5F] hover:bg-[#2A4A6F] text-white rounded-lg text-sm font-medium transition-colors">
             Импортировать ещё
@@ -4751,6 +5325,10 @@ export default function App() {
   const [pendingTransfersGlobal, setPendingTransfersGlobal] = useState([]);
   const [actionLog, setActionLog] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [wsClientId, setWsClientId] = useState(null);
+  const [locksMap, setLocksMap] = useState({});
+  const [wsConnected, setWsConnected] = useState(false);
+  const wsRef = useRef(null);
 
   useEffect(() => {
     const load = async () => {
@@ -4805,6 +5383,153 @@ export default function App() {
     };
     load();
   }, []);
+
+  // ==================== WebSocket real-time sync ====================
+  useEffect(() => {
+    let ws = null;
+    let reconnectDelay = 1000;
+    let destroyed = false;
+
+    const normPo = (r) => ({ ...r, customerAmount: parseFloat(r.customerAmount) || 0, supplierAmount: parseFloat(r.supplierAmount) || 0, orderStage: r.orderStage || (r.status === "completed" ? "done" : r.status === "cancelled" ? "cancelled" : "in_work") });
+    const normFin = (r) => ({ ...r, customerAmount: parseFloat(r.customerAmount) || 0, supplierAmount: parseFloat(r.supplierAmount) || 0, paymentFact: parseFloat(r.paymentFact) || 0, paymentWithAgent: parseFloat(r.paymentWithAgent) || 0, customsCost: parseFloat(r.customsCost) || 0, deliveryCost: parseFloat(r.deliveryCost) || 0, margin: parseFloat(r.margin) || 0, netProfit: parseFloat(r.netProfit) || 0 });
+    const normDebt = (r) => ({ ...r, amount: parseFloat(r.amount) || 0 });
+    const normBal = (r) => ({ ...r, balance: parseFloat(r.balance) || 0 });
+    const normInfra = (r) => ({ ...r, received: parseFloat(r.received) || 0, outgoing: parseFloat(r.outgoing) || 0, bankFees: parseFloat(r.bankFees) || 0, balance: parseFloat(r.balance) || 0 });
+    const normTransfer = (r) => ({ ...r, amount: parseFloat(r.amount) || 0, exchangeRate: parseFloat(r.exchangeRate) || 0, convertedAmount: parseFloat(r.convertedAmount) || 0, from: r.fromAcc || r.from || "", to: r.toAcc || r.to || "", desc: r.description || r.desc || "" });
+
+    const handlers = {
+      "po:create": (d) => setOpenPo((p) => p.some((r) => r.id === d.id) ? p : [...p, normPo(d)]),
+      "po:update": (d) => setOpenPo((p) => p.map((r) => r.id === d.id ? { ...r, ...normPo(d) } : r)),
+      "po:delete": (d) => setOpenPo((p) => p.filter((r) => r.id !== d.id)),
+      "fin:create": (d) => setFinResults((p) => p.some((r) => r.id === d.id) ? p : [...p, normFin(d)]),
+      "fin:update": (d) => setFinResults((p) => p.map((r) => r.id === d.id ? { ...r, ...normFin(d) } : r)),
+      "fin:delete": (d) => setFinResults((p) => p.filter((r) => r.id !== d.id)),
+      "debts:create": (d) => setDebts((p) => p.some((r) => r.id === d.id) ? p : [...p, normDebt(d)]),
+      "debts:update": (d) => setDebts((p) => p.map((r) => r.id === d.id ? { ...r, ...normDebt(d) } : r)),
+      "debts:delete": (d) => setDebts((p) => p.filter((r) => r.id !== d.id)),
+      "balances:update": (d) => setBalances((p) => p.map((r) => r.id === d.id ? { ...r, ...normBal(d) } : r)),
+      "infra:create": (d) => {
+        const op = normInfra(d);
+        setInfraData((prev) => {
+          const acc = op.accountName;
+          const arr = prev[acc] || [];
+          return { ...prev, [acc]: arr.some((r) => r.id === op.id) ? arr : [...arr, op] };
+        });
+      },
+      "infra:update": (d) => {
+        const op = normInfra(d);
+        setInfraData((prev) => {
+          const acc = op.accountName;
+          if (!prev[acc]) return prev;
+          return { ...prev, [acc]: prev[acc].map((r) => r.id === op.id ? { ...r, ...op } : r) };
+        });
+      },
+      "infra:delete": (d) => {
+        setInfraData((prev) => {
+          const result = {};
+          for (const [acc, ops] of Object.entries(prev)) {
+            result[acc] = ops.filter((r) => r.id !== d.id);
+          }
+          return result;
+        });
+      },
+      "transfers:create": (d) => setPendingTransfersGlobal((p) => p.some((r) => r.id === d.id) ? p : [...p, normTransfer(d)]),
+      "transfers:update": (d) => setPendingTransfersGlobal((p) => p.map((r) => r.id === d.id ? { ...r, ...normTransfer(d) } : r)),
+      "transfers:delete": (d) => setPendingTransfersGlobal((p) => p.filter((r) => r.id !== d.id)),
+    };
+
+    function connect() {
+      if (destroyed) return;
+      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      ws = new WebSocket(`${proto}//${window.location.host}`);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        setWsConnected(true);
+        reconnectDelay = 1000;
+      };
+
+      ws.onmessage = (e) => {
+        let msg;
+        try { msg = JSON.parse(e.data); } catch { return; }
+
+        if (msg.type === "connected") {
+          setWsClientId(msg.clientId);
+          api.setClientId(msg.clientId);
+          return;
+        }
+
+        if (msg.type === "broadcast" && handlers[msg.event]) {
+          handlers[msg.event](msg.data);
+          return;
+        }
+
+        if (msg.type === "lock:snapshot") {
+          const m = {};
+          for (const [key, val] of Object.entries(msg.locks)) {
+            m[key] = val;
+          }
+          setLocksMap(m);
+          return;
+        }
+
+        if (msg.type === "lock:acquired") {
+          setLocksMap((prev) => ({ ...prev, [`${msg.entity}:${msg.id}`]: { clientId: msg.clientId, userName: msg.userName } }));
+          return;
+        }
+
+        if (msg.type === "lock:released") {
+          setLocksMap((prev) => {
+            const next = { ...prev };
+            delete next[`${msg.entity}:${msg.id}`];
+            return next;
+          });
+          return;
+        }
+      };
+
+      ws.onclose = () => {
+        setWsConnected(false);
+        wsRef.current = null;
+        if (!destroyed) {
+          setTimeout(connect, reconnectDelay);
+          reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+        }
+      };
+
+      ws.onerror = () => ws.close();
+    }
+
+    connect();
+
+    return () => {
+      destroyed = true;
+      if (ws) ws.close();
+    };
+  }, []);
+
+  const acquireLock = useCallback((entity, id) => {
+    if (wsRef.current?.readyState === 1) {
+      wsRef.current.send(JSON.stringify({ type: "lock:acquire", entity, id }));
+    }
+  }, []);
+
+  const releaseLock = useCallback((entity, id) => {
+    if (wsRef.current?.readyState === 1) {
+      wsRef.current.send(JSON.stringify({ type: "lock:release", entity, id }));
+    }
+  }, []);
+
+  const isLockedByOther = useCallback((entity, id) => {
+    const lock = locksMap[`${entity}:${id}`];
+    return lock && lock.clientId !== wsClientId;
+  }, [locksMap, wsClientId]);
+
+  const getLockUser = useCallback((entity, id) => {
+    const lock = locksMap[`${entity}:${id}`];
+    if (lock && lock.clientId !== wsClientId) return lock.userName;
+    return null;
+  }, [locksMap, wsClientId]);
 
   const makeSyncSetter = useCallback((rawSetter, updateFn, deleteFn) => {
     return (updater) => {
@@ -4890,9 +5615,11 @@ export default function App() {
     if (last.type === "import_apply") {
       api.undoImport({
         poId: last.poId,
-        prevPaymentStatus: last.prevPaymentStatus,
-        prevDatePaid: last.prevDatePaid,
-        prevPaymentFileId: last.prevPaymentFileId,
+        poPaymentSide: last.poPaymentSide,
+        prevPoState: last.prevPoState,
+        finId: last.finId,
+        prevFinState: last.prevFinState,
+        prevDebtsState: last.prevDebtsState,
         infraAccount: last.infraAccount,
         infraOpId: last.infraOpId,
         prevBalance: last.prevBalance,
@@ -4911,6 +5638,17 @@ export default function App() {
           ...prev,
           [last.infraAccount]: (prev[last.infraAccount] || []).filter((op) => op.id !== last.infraOpId),
         }));
+      }
+      if (last.finId && last.prevFinState) {
+        setFinResults((prev) => prev.map((fr) => (
+          fr.id === last.finId ? { ...fr, ...last.prevFinState } : fr
+        )));
+      }
+      if (Array.isArray(last.prevDebtsState) && last.prevDebtsState.length) {
+        const prevDebtMap = new Map(last.prevDebtsState.map((debt) => [debt.id, debt]));
+        setDebts((prev) => prev.map((debt) => (
+          prevDebtMap.has(debt.id) ? { ...debt, ...prevDebtMap.get(debt.id) } : debt
+        )));
       }
     }
     setActionLog((prev) => prev.slice(0, -1));
@@ -5018,18 +5756,24 @@ export default function App() {
         </div>
 
         {/* Нижняя панель */}
-        <div className="border-t border-[#2A4A6F] p-4 flex items-center justify-between">
-          <div className="w-8 h-8 bg-[#2A4A6F] rounded-full flex items-center justify-center cursor-pointer hover:bg-[#3A5A7F]">
-            <span className="text-sm">🔔</span>
+        <div className="border-t border-[#2A4A6F] p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <div className={`w-2.5 h-2.5 rounded-full ${wsConnected ? "bg-emerald-400" : "bg-red-400"}`} />
+            <span className="text-[10px] text-white/60">{wsConnected ? "Онлайн" : "Переподключение..."}</span>
           </div>
-          <div className="w-8 h-8 bg-[#2A4A6F] rounded-full flex items-center justify-center cursor-pointer hover:bg-[#3A5A7F]">
-            <span className="text-sm">⚙</span>
-          </div>
-          <div className="w-8 h-8 bg-[#2A4A6F] rounded-full flex items-center justify-center cursor-pointer hover:bg-[#3A5A7F]">
-            <span className="text-sm">?</span>
-          </div>
-          <div className="w-8 h-8 bg-[#2A4A6F] rounded-full flex items-center justify-center cursor-pointer hover:bg-[#3A5A7F]">
-            <span className="text-xs font-semibold">K</span>
+          <div className="flex items-center justify-between">
+            <div className="w-8 h-8 bg-[#2A4A6F] rounded-full flex items-center justify-center cursor-pointer hover:bg-[#3A5A7F]">
+              <span className="text-sm">🔔</span>
+            </div>
+            <div className="w-8 h-8 bg-[#2A4A6F] rounded-full flex items-center justify-center cursor-pointer hover:bg-[#3A5A7F]">
+              <span className="text-sm">⚙</span>
+            </div>
+            <div className="w-8 h-8 bg-[#2A4A6F] rounded-full flex items-center justify-center cursor-pointer hover:bg-[#3A5A7F]">
+              <span className="text-sm">?</span>
+            </div>
+            <div className="w-8 h-8 bg-[#2A4A6F] rounded-full flex items-center justify-center cursor-pointer hover:bg-[#3A5A7F]">
+              <span className="text-xs font-semibold">K</span>
+            </div>
           </div>
         </div>
       </div>
@@ -5060,11 +5804,11 @@ export default function App() {
             </div>
           ) : (<>
           <div style={{ display: activeTab === "dashboard" ? "block" : "none" }}><Dashboard balances={balances} debts={debts} finResults={finResults} openPo={openPo} infraData={infraData} /></div>
-          <div style={{ display: activeTab === "fin" ? "block" : "none" }}><FinResults data={finResults} setData={syncFinResults} pushLog={pushLog} debts={debts} setDebts={syncDebts} /></div>
-          <div style={{ display: activeTab === "openpo" ? "block" : "none" }}><OpenPO data={openPo} setData={syncOpenPo} pushLog={pushLog} finResults={finResults} setFinResults={syncFinResults} /></div>
+          <div style={{ display: activeTab === "fin" ? "block" : "none" }}><FinResults data={finResults} setData={syncFinResults} pushLog={pushLog} debts={debts} setDebts={syncDebts} acquireLock={acquireLock} releaseLock={releaseLock} isLockedByOther={isLockedByOther} getLockUser={getLockUser} /></div>
+          <div style={{ display: activeTab === "openpo" ? "block" : "none" }}><OpenPO data={openPo} setData={syncOpenPo} pushLog={pushLog} finResults={finResults} setFinResults={syncFinResults} acquireLock={acquireLock} releaseLock={releaseLock} isLockedByOther={isLockedByOther} getLockUser={getLockUser} /></div>
           <div style={{ display: activeTab === "debts" ? "block" : "none" }}><Debts debts={debts} setDebts={syncDebts} pushLog={pushLog} finResults={finResults} setFinResults={syncFinResults} openPo={openPo} /></div>
           <div style={{ display: activeTab === "infra" ? "block" : "none" }}><Infrastructure balances={balances} setBalances={syncBalances} pushLog={pushLog} infraData={infraData} setInfraData={setInfraData} pendingTransfers={pendingTransfersGlobal} setPendingTransfers={setPendingTransfersGlobal} /></div>
-          <div style={{ display: activeTab === "import" ? "block" : "none" }}><BankImport balances={balances} setBalances={syncBalances} openPo={openPo} setOpenPo={syncOpenPo} infraData={infraData} setInfraData={setInfraData} pushLog={pushLog} finResults={finResults} setFinResults={syncFinResults} /></div>
+          <div style={{ display: activeTab === "import" ? "block" : "none" }}><BankImport balances={balances} setBalances={syncBalances} openPo={openPo} setOpenPo={syncOpenPo} finResults={finResults} setFinResults={syncFinResults} infraData={infraData} setInfraData={setInfraData} debts={debts} setDebts={syncDebts} pushLog={pushLog} /></div>
           </>)}
         </div>
       </div>

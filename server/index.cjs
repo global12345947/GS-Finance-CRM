@@ -1,8 +1,11 @@
 require("dotenv").config();
+const http = require("http");
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
+const fs = require("fs");
 const { initDB } = require("./db.cjs");
+const { setupWS } = require("./ws.cjs");
 
 const poRoutes = require("./routes/po.cjs");
 const finRoutes = require("./routes/fin.cjs");
@@ -14,7 +17,8 @@ const filesRoutes = require("./routes/files.cjs");
 const importRoutes = require("./routes/import.cjs");
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const server = http.createServer(app);
+const PORT = process.env.PORT || 3000;
 
 app.use(cors({ origin: true }));
 app.use(express.json({ limit: "50mb" }));
@@ -59,10 +63,10 @@ app.get("/api/exchange-rate", async (req, res) => {
 });
 
 const distPath = path.join(__dirname, "..", "dist");
-const fs = require("fs");
 if (fs.existsSync(distPath)) {
   app.use(express.static(distPath));
-  app.get("*", (req, res) => {
+  app.get("*", (req, res, next) => {
+    if (req.path.startsWith("/api")) return next();
     res.sendFile(path.join(distPath, "index.html"));
   });
   console.log("[Server] Раздача фронтенда из dist/");
@@ -75,8 +79,9 @@ app.use((err, req, res, next) => {
 
 const start = async () => {
   await initDB();
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`[Server] GS CRM API запущен на http://localhost:${PORT}`);
+  setupWS(server);
+  server.listen(PORT, "0.0.0.0", () => {
+    console.log(`[Server] GS CRM: http://localhost:${PORT} (REST + WebSocket)`);
   });
 };
 

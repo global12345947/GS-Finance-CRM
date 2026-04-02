@@ -1,5 +1,6 @@
 const { Router } = require("express");
 const { pool } = require("../db.cjs");
+const { broadcast } = require("../ws.cjs");
 const router = Router();
 
 const snakeToCamel = (row) => {
@@ -27,7 +28,9 @@ router.put("/:id", async (req, res) => {
       "UPDATE balances SET balance = $1 WHERE id = $2 RETURNING *",
       [balance, parseInt(req.params.id)]
     );
-    res.json(snakeToCamel(rows[0]));
+    const row = snakeToCamel(rows[0]);
+    broadcast("balances:update", row, req.headers["x-client-id"]);
+    res.json(row);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

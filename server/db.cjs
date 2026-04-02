@@ -27,6 +27,7 @@ const initDB = async () => {
         customer_amount NUMERIC DEFAULT 0,
         payment_status_customer TEXT,
         date_customer_paid TEXT,
+        customer_payment_file_id TEXT,
         internal_po_ref TEXT,
         date_placed_supplier TEXT,
         resp_procurement TEXT,
@@ -174,6 +175,7 @@ const initDB = async () => {
       { table: "open_po", column: "payment_file_id", type: "TEXT" },
       { table: "open_po", column: "customer_payment_file_id", type: "TEXT" },
       { table: "fin_results", column: "customer_po", type: "TEXT" },
+      { table: "fin_results", column: "supplier_amounts", type: "TEXT" },
     ];
     for (const m of migrations) {
       try {

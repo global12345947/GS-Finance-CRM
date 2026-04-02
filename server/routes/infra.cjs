@@ -1,5 +1,6 @@
 const { Router } = require("express");
 const { pool } = require("../db.cjs");
+const { broadcast } = require("../ws.cjs");
 const router = Router();
 
 const snakeToCamel = (row) => {
@@ -61,7 +62,9 @@ router.post("/", async (req, res) => {
       `INSERT INTO infra_operations (${quotedKeys.join(", ")}) VALUES (${placeholders.join(", ")}) RETURNING *`,
       vals
     );
-    res.json(snakeToCamel(rows[0]));
+    const row = snakeToCamel(rows[0]);
+    broadcast("infra:create", row, req.headers["x-client-id"]);
+    res.json(row);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -69,12 +72,28 @@ router.post("/", async (req, res) => {
 
 router.put("/:id", async (req, res) => {
   try {
-    const { comment } = req.body;
+    const id = parseInt(req.params.id);
+    const allowed = ["po_ref", "description", "received", "outgoing", "bank_fees", "supplier", "invoice", "date", "balance", "comment"];
+    const { camelToSnake } = require("../utils.cjs");
+    const snake = camelToSnake(req.body);
+    const sets = [];
+    const vals = [];
+    let idx = 1;
+    for (const col of allowed) {
+      if (snake[col] !== undefined) {
+        sets.push(`"${col}" = $${idx++}`);
+        vals.push(snake[col]);
+      }
+    }
+    if (sets.length === 0) return res.status(400).json({ error: "No valid fields" });
+    vals.push(id);
     const { rows } = await pool.query(
-      "UPDATE infra_operations SET comment = $1 WHERE id = $2 RETURNING *",
-      [comment, parseInt(req.params.id)]
+      `UPDATE infra_operations SET ${sets.join(", ")} WHERE id = $${idx} RETURNING *`,
+      vals
     );
-    res.json(snakeToCamel(rows[0]));
+    const row = snakeToCamel(rows[0]);
+    broadcast("infra:update", row, req.headers["x-client-id"]);
+    res.json(row);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -82,6 +101,7 @@ router.put("/:id", async (req, res) => {
 
 router.delete("/by-transfer/:transferId", async (req, res) => {
   try {
+    const cid = req.headers["x-client-id"];
     const tid = parseInt(req.params.transferId);
     let { rows } = await pool.query(
       "DELETE FROM infra_operations WHERE transfer_id = $1 RETURNING *",
@@ -94,7 +114,9 @@ router.delete("/by-transfer/:transferId", async (req, res) => {
       );
       rows = result.rows;
     }
-    res.json({ deleted: rows.length, ops: rows.map(snakeToCamel) });
+    const ops = rows.map(snakeToCamel);
+    ops.forEach((op) => broadcast("infra:delete", { id: op.id, accountName: op.accountName }, cid));
+    res.json({ deleted: rows.length, ops });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -103,7 +125,9 @@ router.delete("/by-transfer/:transferId", async (req, res) => {
 router.delete("/:id", async (req, res) => {
   try {
     const { rows } = await pool.query("DELETE FROM infra_operations WHERE id = $1 RETURNING *", [parseInt(req.params.id)]);
-    res.json(rows[0] ? snakeToCamel(rows[0]) : { deleted: true });
+    const row = rows[0] ? snakeToCamel(rows[0]) : null;
+    if (row) broadcast("infra:delete", { id: row.id, accountName: row.accountName }, req.headers["x-client-id"]);
+    res.json(row || { deleted: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

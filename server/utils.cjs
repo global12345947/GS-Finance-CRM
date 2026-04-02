@@ -28,7 +28,7 @@ const COLUMNS = {
   fin_results: new Set([
     "type", "status", "customer", "customer_po", "order_date", "customer_amount",
     "order_status", "payment_fact", "payment_date", "payment_doc_file_id", "supplier_po",
-    "supplier_amount", "supplier", "final_buyer", "fin_agent", "payment_with_agent",
+    "supplier_amount", "supplier_amounts", "supplier", "final_buyer", "fin_agent", "payment_with_agent",
     "customs_cost", "delivery_cost", "margin", "net_profit", "vat_exempt", "comment",
     "has_upd", "upd_num", "upd_date", "upd_file_id", "no_global_smart",
   ]),

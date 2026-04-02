@@ -1,6 +1,7 @@
 const { Router } = require("express");
 const { pool } = require("../db.cjs");
 const { snakeToCamel, buildInsert, buildUpdate } = require("../utils.cjs");
+const { broadcast } = require("../ws.cjs");
 const router = Router();
 
 router.get("/", async (req, res) => {
@@ -16,7 +17,9 @@ router.post("/", async (req, res) => {
   try {
     const { sql, vals } = buildInsert("debts", req.body);
     const { rows } = await pool.query(sql, vals);
-    res.json(snakeToCamel(rows[0]));
+    const row = snakeToCamel(rows[0]);
+    broadcast("debts:create", row, req.headers["x-client-id"]);
+    res.json(row);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -27,7 +30,9 @@ router.put("/:id", async (req, res) => {
     const q = buildUpdate("debts", req.params.id, req.body);
     if (!q) return res.status(400).json({ error: "No valid fields" });
     const { rows } = await pool.query(q.sql, q.vals);
-    res.json(snakeToCamel(rows[0]));
+    const row = snakeToCamel(rows[0]);
+    broadcast("debts:update", row, req.headers["x-client-id"]);
+    res.json(row);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
