@@ -4301,14 +4301,22 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
   return (
     <div className="space-y-6">
       {/* Переключатель режимов */}
-      <div className="flex gap-1 bg-gray-100 rounded-lg p-1">
+      <div className="flex border-2 border-[#1E3A5F]/20 rounded-xl overflow-hidden">
         <button onClick={() => { if (mode !== "ru") { reset(); setMode("ru"); } }}
-          className={`flex-1 py-2.5 px-4 rounded-md text-sm font-medium transition-colors ${mode === "ru" ? "bg-white text-[#1E3A5F] shadow-sm" : "text-gray-500 hover:text-gray-700"}`}>
-          🇷🇺 Платёжный документ РФ
+          className={`flex-1 py-3.5 px-6 text-sm font-semibold transition-all flex items-center justify-center gap-2.5 ${
+            mode === "ru"
+              ? "bg-[#1E3A5F] text-white border-r border-[#1E3A5F]"
+              : "bg-white text-gray-500 hover:bg-gray-50 border-r border-[#1E3A5F]/20"
+          }`}>
+          <span className="text-lg">🇷🇺</span> Платёжный документ РФ
         </button>
         <button onClick={() => { if (mode !== "foreign") { reset(); setMode("foreign"); } }}
-          className={`flex-1 py-2.5 px-4 rounded-md text-sm font-medium transition-colors ${mode === "foreign" ? "bg-white text-[#1E3A5F] shadow-sm" : "text-gray-500 hover:text-gray-700"}`}>
-          🌍 Иностранный платёжный документ
+          className={`flex-1 py-3.5 px-6 text-sm font-semibold transition-all flex items-center justify-center gap-2.5 ${
+            mode === "foreign"
+              ? "bg-[#1E3A5F] text-white"
+              : "bg-white text-gray-500 hover:bg-gray-50"
+          }`}>
+          <span className="text-lg">🌍</span> Иностранный платёжный документ
         </button>
       </div>
 
@@ -4330,11 +4338,14 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
         <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6">
           <h3 className="text-[#1E3A5F] font-semibold text-base mb-4 flex items-center gap-2">
             <span className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center text-lg">📄</span>
-            Загрузите платёжный документ
+            {mode === "ru" ? "Загрузите платёжный документ РФ" : "Загрузите платёжный документ"}
           </h3>
           <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-5 text-sm text-blue-800">
             <p>Поддерживаемые форматы: <strong>PDF, JPEG, PNG, CSV</strong></p>
-            <p className="mt-1">AI автоматически распознает данные из документа любого банка</p>
+            <p className="mt-1">{mode === "ru"
+              ? "Система распознает реквизиты платёжного поручения РФ и ищет заказ по договору, УПД и плательщику"
+              : "AI автоматически распознает данные из документа любого банка"
+            }</p>
           </div>
 
           <div
