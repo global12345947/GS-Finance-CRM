@@ -93,3 +93,33 @@ export const applyImport = (data) =>
 
 export const undoImport = (data) =>
   fetch(`${API}/import/undo`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(json);
+
+// ==================== Импорт РФ платежей ====================
+export const parsePaymentRF = async (file) => {
+  const formData = new FormData();
+  formData.append("file", file);
+  const r = await fetch(`${API}/import/parse-rf`, { method: "POST", body: formData });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+    throw new Error(err.error || `HTTP ${r.status}`);
+  }
+  return r.json();
+};
+
+export const matchPaymentRF = (data) =>
+  fetch(`${API}/import/match-rf`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(json);
+
+export const applyImportRF = (data) =>
+  fetch(`${API}/import/apply-rf`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(json);
+
+export const undoImportRF = (data) =>
+  fetch(`${API}/import/undo-rf`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(json);
+
+export const matchPaymentRu = (data) =>
+  fetch(`${API}/import/match-ru`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(json);
+
+export const applyImportRu = (data) =>
+  fetch(`${API}/import/apply-ru`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(json);
+
+export const undoImportRu = (data) =>
+  fetch(`${API}/import/undo-ru`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(json);

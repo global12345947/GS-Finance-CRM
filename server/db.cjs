@@ -172,6 +172,8 @@ const initDB = async () => {
       { table: "pending_transfers", column: "exchange_rate", type: "NUMERIC" },
       { table: "pending_transfers", column: "converted_amount", type: "NUMERIC" },
       { table: "open_po", column: "payment_file_id", type: "TEXT" },
+      { table: "open_po", column: "customer_payment_file_id", type: "TEXT" },
+      { table: "fin_results", column: "customer_po", type: "TEXT" },
     ];
     for (const m of migrations) {
       try {

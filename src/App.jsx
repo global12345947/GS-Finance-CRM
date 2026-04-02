@@ -340,12 +340,20 @@ const parseDeliveryCost = (raw) => {
       actual = actual ? actual + "\n" + line : line;
     }
   }
-  // Если нет явного "plan" и нет факта — считаем всё фактом
   if (!plan && actual) {
-    // Если строка одна и содержит только стоимость — это факт
     return { plan: "", actual };
   }
   return { plan, actual };
+};
+
+// ==================== ПАРСЕР logisticsPlan: план / факт. логистика ====================
+const parseLogisticsPlan = (raw) => {
+  if (!raw) return { plan: "", actual: "" };
+  const str = String(raw);
+  // В БД перенос строки хранится как литеральный "\n" (два символа)
+  const lines = str.split(/\\n|\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length <= 1) return { plan: str, actual: "" };
+  return { plan: lines[0], actual: lines.slice(1).join("; ") };
 };
 
 // ==================== ФИЛЬТР КОЛОНОК (Google Sheets style) ====================
@@ -377,7 +385,7 @@ const getPoFilterValue = (o, colKey) => {
       const vals = (o.payingCompany || "").split("\n").map((s) => s.trim()).filter(Boolean);
       return vals.length ? vals : ["(пусто)"];
     }
-    case "deliveryPlan": return [o.logisticsPlan || "(пусто)"];
+    case "deliveryPlan": return [parseLogisticsPlan(o.logisticsPlan).plan || "(пусто)"];
     case "orderStage": {
       const s = ORDER_STAGES.find((st) => st.key === o.orderStage);
       return [s ? s.label : "(не указана)"];
@@ -1361,12 +1369,16 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts }) => {
                   <td className="py-2.5 px-2 text-center">
                     {r.paymentFact > 0 ? (
                       <div className="flex items-center justify-center gap-1">
-                        <span className="text-emerald-700 font-mono text-xs font-semibold" title={`₽${r.paymentFact.toLocaleString("ru-RU")}`}>
-                          ₽{fmt(r.paymentFact)}
-                        </span>
-                        {r.paymentDocFileId && (
-                          <button onClick={(e) => { e.stopPropagation(); downloadFile(r.paymentDocFileId, `Платёжка_${r.customerPo}.pdf`); }}
-                            className="text-blue-500 hover:text-blue-700 text-[10px] font-medium" title="Скачать платёжку">⬇</button>
+                        {r.paymentDocFileId ? (
+                          <a href={api.getFileUrl(r.paymentDocFileId)} onClick={(e) => e.stopPropagation()}
+                            className="text-emerald-700 font-mono text-xs font-semibold hover:text-blue-600 hover:underline cursor-pointer transition-colors"
+                            title="Нажмите, чтобы скачать платёжку">
+                            ₽{r.paymentFact.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </a>
+                        ) : (
+                          <span className="text-emerald-700 font-mono text-xs font-semibold">
+                            ₽{r.paymentFact.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </span>
                         )}
                       </div>
                     ) : (
@@ -1680,8 +1692,10 @@ const ExpandedLogisticsPanel = ({ order, setData, pushLog }) => {
 
   // Разбиваем deliveryCost на план / факт
   const parsed = parseDeliveryCost(order.deliveryCost);
-  // Факт. стоимость: сначала отдельное поле, потом парсинг из deliveryCost
-  const actualCost = order.deliveryActualCost || parsed.actual || "";
+  // Факт из logisticsPlan (вторая строка)
+  const parsedLP = parseLogisticsPlan(order.logisticsPlan);
+  // Факт. стоимость: отдельное поле → парсинг deliveryCost → вторая строка logisticsPlan
+  const actualCost = order.deliveryActualCost || parsed.actual || parsedLP.actual || "";
 
   // Цвета миль
   const milestoneColors = {
@@ -1713,13 +1727,14 @@ const ExpandedLogisticsPanel = ({ order, setData, pushLog }) => {
       awb: order.awb, milestone: order.milestone, deliveryActualCost: order.deliveryActualCost,
       termsDelivery: order.termsDelivery, deliveryVat: order.deliveryVat,
       comments: order.comments, deliveryCost: order.deliveryCost,
+      logisticsPlan: order.logisticsPlan,
     }});
     const updates = { ...form };
-    // При сохранении доставки — обновляем deliveryCost: план + факт
     if (editing === "delivery") {
-      const planPart = parsed.plan;
       const newActual = form.deliveryActualCost || "";
-      updates.deliveryCost = [planPart, newActual].filter(Boolean).join("\n");
+      const numVal = parseFloat(String(newActual).replace(/[^0-9.,]/g, '').replace(',', '.'));
+      updates.deliveryCost = isNaN(numVal) ? 0 : numVal;
+      delete updates.deliveryActualCost;
     }
     setData((prev) => prev.map((r) => (r.id === order.id ? { ...r, ...updates } : r)));
     setEditing(null);
@@ -2385,11 +2400,17 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                           <button onClick={cancelInlineEdit} className="w-full text-left px-3 py-1.5 text-xs text-gray-400 hover:bg-gray-100 border-t border-gray-100">Отмена</button>
                       </div>
                       ) : (
-                        <span onClick={() => startInlineEdit(o, "paymentStatusCustomer")}
-                          className={`px-1.5 py-0.5 rounded text-[10px] font-medium cursor-pointer hover:ring-2 hover:ring-blue-300 transition-all ${isPaid ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}
-                          title="Нажмите для выбора">
-                          {(o.paymentStatusCustomer || "—").substring(0, 20)}
-                        </span>
+                        <div className="flex items-center justify-center gap-1">
+                          <span onClick={() => startInlineEdit(o, "paymentStatusCustomer")}
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-medium cursor-pointer hover:ring-2 hover:ring-blue-300 transition-all ${isPaid ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}
+                            title="Нажмите для выбора">
+                            {(o.paymentStatusCustomer || "—").substring(0, 20)}
+                          </span>
+                          {isPaid && o.customerPaymentFileId && (
+                            <a href={api.getFileUrl(o.customerPaymentFileId)} title="Скачать платёжку клиента" onClick={(e) => e.stopPropagation()}
+                              className="text-blue-500 hover:text-blue-700 text-xs">📎</a>
+                          )}
+                        </div>
                       )}
                     </td>
                     {/* Дата оплаты клиента */}
@@ -2491,7 +2512,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
                         <td className="py-2 px-2 text-center text-gray-600 text-xs max-w-[80px] truncate">{companies.length > 0 ? companies.join(", ") : "—"}</td>
                       </>);
                     })()}
-                    <td className="py-2 px-2 text-center text-gray-600 text-xs max-w-[80px] truncate">{o.logisticsPlan || "—"}</td>
+                    <td className="py-2 px-2 text-center text-gray-600 text-xs max-w-[80px] truncate">{parseLogisticsPlan(o.logisticsPlan).plan || "—"}</td>
                     <td className="py-2 px-2 text-center" onClick={(e) => e.stopPropagation()}>
                       <KanbanDropdown order={o} setData={setData} pushLog={pushLog} syncUpdToFinResults={syncUpdToFinResults} />
                     </td>
@@ -4018,7 +4039,8 @@ const Infrastructure = ({ balances, setBalances, pushLog, infraData, setInfraDat
 };
 
 // ==================== ИМПОРТ БАНКОВСКИХ ПЛАТЕЖЕЙ ====================
-const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setInfraData, pushLog }) => {
+const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setInfraData, pushLog, finResults, setFinResults }) => {
+  const [mode, setMode] = useState("foreign");
   const [step, setStep] = useState(0);
   const [file, setFile] = useState(null);
   const [dragOver, setDragOver] = useState(false);
@@ -4035,6 +4057,10 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
   const [aiReasoning, setAiReasoning] = useState("");
   const [aiConfidence, setAiConfidence] = useState("");
   const [history, setHistory] = useState([]);
+  const [ruPoMatches, setRuPoMatches] = useState([]);
+  const [ruFinMatches, setRuFinMatches] = useState([]);
+  const [selectedRuPoIds, setSelectedRuPoIds] = useState(new Set());
+  const [selectedRuFinIds, setSelectedRuFinIds] = useState(new Set());
 
   const fmt = (n) => n?.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) || "0.00";
 
@@ -4043,6 +4069,8 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
     setParsed(null); setEditParsed(null); setSuggestedAccount("");
     setMatches([]); setSelectedPo(null); setSelectedAccount(""); setResult(null);
     setAiReasoning(""); setAiConfidence("");
+    setRuPoMatches([]); setRuFinMatches([]);
+    setSelectedRuPoIds(new Set()); setSelectedRuFinIds(new Set());
   };
 
   const handleFile = (f) => {
@@ -4062,12 +4090,19 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
     if (!file) return;
     setLoading(true); setError("");
     try {
-      const res = await api.parsePayment(file);
-      setParsed(res.parsed);
-      setEditParsed({ ...res.parsed });
-      setSuggestedAccount(res.suggestedAccount || "");
-      setSelectedAccount(res.suggestedAccount || "");
-      setStep(1);
+      if (mode === "ru") {
+        const res = await api.parsePaymentRF(file);
+        setParsed(res.parsed);
+        setEditParsed({ ...res.parsed });
+        setStep(1);
+      } else {
+        const res = await api.parsePayment(file);
+        setParsed(res.parsed);
+        setEditParsed({ ...res.parsed });
+        setSuggestedAccount(res.suggestedAccount || "");
+        setSelectedAccount(res.suggestedAccount || "");
+        setStep(1);
+      }
     } catch (err) {
       setError(err.message || "Ошибка при парсинге");
     } finally {
@@ -4177,6 +4212,84 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
     }
   };
 
+  const handleMatchRu = async () => {
+    setLoading(true); setError("");
+    try {
+      const res = await api.matchPaymentRu({
+        payer: editParsed.payer,
+        amount: editParsed.amount,
+        currency: editParsed.currency,
+        reference: editParsed.reference,
+        date: editParsed.date,
+      });
+      setRuPoMatches(res.poMatches || []);
+      setRuFinMatches(res.finMatches || []);
+      setAiReasoning(res.aiReasoning || "");
+      setAiConfidence(res.aiConfidence || "none");
+      const poIds = new Set((res.poMatches || []).map((m) => m.id));
+      const finIds = new Set((res.finMatches || []).map((m) => m.id));
+      setSelectedRuPoIds(poIds);
+      setSelectedRuFinIds(finIds);
+      setStep(2);
+    } catch (err) {
+      setError(err.message || "Ошибка поиска");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleApplyRu = async () => {
+    setApplying(true); setError("");
+    try {
+      let paymentFileId = null;
+      const uploaded = await api.uploadFile(file, "payments", [...selectedRuPoIds][0]);
+      paymentFileId = uploaded.id;
+
+      const res = await api.applyImportRu({
+        poIds: [...selectedRuPoIds],
+        finIds: [...selectedRuFinIds],
+        paymentFileId,
+        datePaid: editParsed.date,
+        amount: editParsed.amount,
+        parsedData: editParsed,
+      });
+
+      pushLog({
+        type: "import_apply_ru",
+        prevPoStates: res.prevPoStates || [],
+        prevFinStates: res.prevFinStates || [],
+        importHistoryId: res.importHistoryId || null,
+      });
+
+      if (res.poUpdated?.length) {
+        setOpenPo((prev) => prev.map((po) =>
+          res.poUpdated.includes(po.id) ? { ...po, paymentStatusCustomer: "Paid", dateCustomerPaid: editParsed.date, customerPaymentFileId: paymentFileId } : po
+        ));
+      }
+
+      if (res.finUpdated?.length) {
+        setFinResults((prev) => prev.map((fr) =>
+          res.finUpdated.includes(fr.id) ? { ...fr, paymentFact: editParsed.amount, paymentDate: editParsed.date, paymentDocFileId: paymentFileId, status: (res.finNewStatuses?.[fr.id] || fr.status) } : fr
+        ));
+      }
+
+      setResult(res);
+      setStep(3);
+    } catch (err) {
+      setError(err.message || "Ошибка при применении");
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  const toggleRuPoId = (id) => setSelectedRuPoIds((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const toggleRuFinId = (id) => setSelectedRuFinIds((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+
+  const fmtRub = (n) => {
+    if (!n) return "0,00";
+    return parseFloat(n).toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  };
+
   const EditField = ({ label, field, type }) => (
     <div>
       <label className="text-xs text-gray-500 font-medium mb-1 block">{label}</label>
@@ -4187,6 +4300,18 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
 
   return (
     <div className="space-y-6">
+      {/* Переключатель режимов */}
+      <div className="flex gap-1 bg-gray-100 rounded-lg p-1">
+        <button onClick={() => { if (mode !== "ru") { reset(); setMode("ru"); } }}
+          className={`flex-1 py-2.5 px-4 rounded-md text-sm font-medium transition-colors ${mode === "ru" ? "bg-white text-[#1E3A5F] shadow-sm" : "text-gray-500 hover:text-gray-700"}`}>
+          🇷🇺 Платёжный документ РФ
+        </button>
+        <button onClick={() => { if (mode !== "foreign") { reset(); setMode("foreign"); } }}
+          className={`flex-1 py-2.5 px-4 rounded-md text-sm font-medium transition-colors ${mode === "foreign" ? "bg-white text-[#1E3A5F] shadow-sm" : "text-gray-500 hover:text-gray-700"}`}>
+          🌍 Иностранный платёжный документ
+        </button>
+      </div>
+
       {/* Шаги */}
       <div className="flex items-center gap-2 mb-2">
         {["Загрузка", "Распознано", "Сопоставление", "Готово"].map((label, i) => (
@@ -4260,16 +4385,29 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
           </h3>
           <p className="text-sm text-gray-500 mb-4">Проверьте и при необходимости исправьте</p>
 
-          <div className="grid grid-cols-2 gap-4">
-            <EditField label="Плательщик" field="payer" />
-            <EditField label="Получатель (поставщик)" field="beneficiary" />
-            <EditField label="Сумма" field="amount" type="number" />
-            <EditField label="Валюта" field="currency" />
-            <EditField label="Комиссия банка" field="fees" type="number" />
-            <EditField label="Дата платежа" field="date" type="date" />
-            <EditField label="Референс / номер ПО" field="reference" />
-            <EditField label="Банк" field="bankName" />
-          </div>
+          {mode === "foreign" ? (
+            <div className="grid grid-cols-2 gap-4">
+              <EditField label="Плательщик" field="payer" />
+              <EditField label="Получатель (поставщик)" field="beneficiary" />
+              <EditField label="Сумма" field="amount" type="number" />
+              <EditField label="Валюта" field="currency" />
+              <EditField label="Комиссия банка" field="fees" type="number" />
+              <EditField label="Дата платежа" field="date" type="date" />
+              <EditField label="Референс / номер ПО" field="reference" />
+              <EditField label="Банк" field="bankName" />
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-4">
+              <EditField label="Плательщик (клиент)" field="payer" />
+              <EditField label="Получатель" field="beneficiary" />
+              <EditField label="Сумма (₽)" field="amount" type="number" />
+              <EditField label="Валюта" field="currency" />
+              <EditField label="Дата платежа" field="date" type="date" />
+              <EditField label="Номер договора / референс" field="reference" />
+              <EditField label="Банк плательщика" field="bankName" />
+              <EditField label="Номер п/п" field="paymentNumber" />
+            </div>
+          )}
 
           {error && <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>}
 
@@ -4277,20 +4415,19 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
             <button onClick={reset} className="px-5 py-2.5 text-gray-600 hover:text-gray-900 text-sm transition-colors">
               ← Назад
             </button>
-            <button onClick={handleMatch} disabled={loading}
+            <button onClick={mode === "foreign" ? handleMatch : handleMatchRu} disabled={loading}
               className="px-6 py-2.5 bg-[#1E3A5F] hover:bg-[#2A4A6F] disabled:opacity-40 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2">
               {loading ? (
                 <><svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg> Поиск...</>
-              ) : "Найти совпадения в Open PO"}
+              ) : mode === "foreign" ? "Найти совпадения в Open PO" : "Найти совпадения в Open PO и Фин. результате"}
             </button>
           </div>
         </div>
       )}
 
       {/* ШАГ 2 — Сопоставление */}
-      {step === 2 && (
+      {step === 2 && mode === "foreign" && (
         <div className="space-y-5">
-          {/* Совпадения PO */}
           <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6">
             <h3 className="text-[#1E3A5F] font-semibold text-base mb-3 flex items-center gap-2">
               <span className="w-8 h-8 bg-amber-100 rounded-lg flex items-center justify-center text-lg">🔗</span>
@@ -4360,7 +4497,6 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
             )}
           </div>
 
-          {/* Выбор инфраструктурного счёта */}
           <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6">
             <h3 className="text-[#1E3A5F] font-semibold text-base mb-4">Счёт списания</h3>
             <select value={selectedAccount} onChange={(e) => setSelectedAccount(e.target.value)}
@@ -4377,7 +4513,6 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
             )}
           </div>
 
-          {/* Предпросмотр изменений */}
           <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6">
             <h3 className="text-[#1E3A5F] font-semibold text-base mb-4">Предпросмотр изменений</h3>
             <div className="space-y-3 text-sm">
@@ -4407,18 +4542,167 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
                 <p className="text-gray-400 text-center py-4">Выберите PO и/или счёт списания</p>
               )}
             </div>
-
             {error && <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>}
-
             <div className="flex justify-between mt-5">
-              <button onClick={() => setStep(1)} className="px-5 py-2.5 text-gray-600 hover:text-gray-900 text-sm transition-colors">
-                ← Назад
-              </button>
+              <button onClick={() => setStep(1)} className="px-5 py-2.5 text-gray-600 hover:text-gray-900 text-sm transition-colors">← Назад</button>
               <button onClick={handleApply} disabled={applying || (!selectedPo && !selectedAccount)}
                 className="px-6 py-2.5 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2">
-                {applying ? (
-                  <><svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg> Применяю...</>
-                ) : "Применить"}
+                {applying ? (<><svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg> Применяю...</>) : "Применить"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ШАГ 2 — Сопоставление (РФ) */}
+      {step === 2 && mode === "ru" && (
+        <div className="space-y-5">
+          <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6">
+            <h3 className="text-[#1E3A5F] font-semibold text-base mb-3 flex items-center gap-2">
+              <span className="w-8 h-8 bg-amber-100 rounded-lg flex items-center justify-center text-lg">🔗</span>
+              Совпадения в Open PO
+              {aiConfidence && (
+                <span className={`ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                  aiConfidence === "high" ? "bg-emerald-100 text-emerald-700" : aiConfidence === "medium" ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
+                }`}>
+                  {aiConfidence === "high" ? "AI: высокая уверенность" : aiConfidence === "medium" ? "AI: средняя уверенность" : "AI: не найдено"}
+                </span>
+              )}
+            </h3>
+            {aiReasoning && (
+              <div className="mb-4 p-3 bg-indigo-50 border border-indigo-200 rounded-lg text-xs text-indigo-700">
+                <span className="font-semibold">AI:</span> {aiReasoning}
+              </div>
+            )}
+            {ruPoMatches.length > 0 ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-[#1E3A5F] text-white text-center text-xs uppercase">
+                      <th className="py-2.5 px-3 font-semibold w-10"></th>
+                      <th className="py-2.5 px-3 font-semibold">PO</th>
+                      <th className="py-2.5 px-3 font-semibold">Клиент</th>
+                      <th className="py-2.5 px-3 font-semibold">Сумма кл.</th>
+                      <th className="py-2.5 px-3 font-semibold">Оплата кл.</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ruPoMatches.map((m) => {
+                      const sel = selectedRuPoIds.has(m.id);
+                      const paid = (m.paymentStatusCustomer || "").toLowerCase().includes("paid") && !(m.paymentStatusCustomer || "").toLowerCase().includes("not");
+                      return (
+                        <tr key={m.id} onClick={() => toggleRuPoId(m.id)}
+                          className={`border-b border-gray-200 cursor-pointer transition-colors ${sel ? "bg-blue-50 ring-1 ring-blue-400" : "hover:bg-gray-50"}`}>
+                          <td className="py-2.5 px-3 text-center">
+                            <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${sel ? "border-blue-500 bg-blue-500" : "border-gray-300"}`}>
+                              {sel && <span className="text-white text-xs">✓</span>}
+                            </div>
+                          </td>
+                          <td className="py-2.5 px-3 text-center text-xs font-medium text-gray-900">{m.internalPo}</td>
+                          <td className="py-2.5 px-3 text-center text-xs text-gray-700">{m.customer}</td>
+                          <td className="py-2.5 px-3 text-center text-xs text-gray-700">${fmt(parseFloat(m.customerAmount) || 0)}</td>
+                          <td className="py-2.5 px-3 text-center text-xs">
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${paid ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                              {m.paymentStatusCustomer || "Not paid"}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="text-center py-6 text-gray-400">
+                <div className="text-3xl mb-2">📋</div>
+                <p>Совпадений в Open PO не найдено</p>
+              </div>
+            )}
+          </div>
+
+          <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6">
+            <h3 className="text-[#1E3A5F] font-semibold text-base mb-3 flex items-center gap-2">
+              <span className="w-8 h-8 bg-purple-100 rounded-lg flex items-center justify-center text-lg">📊</span>
+              Совпадения в Фин. результате
+            </h3>
+            {ruFinMatches.length > 0 ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-[#1E3A5F] text-white text-center text-xs uppercase">
+                      <th className="py-2.5 px-3 font-semibold w-10"></th>
+                      <th className="py-2.5 px-3 font-semibold">PO клиента</th>
+                      <th className="py-2.5 px-3 font-semibold">Клиент</th>
+                      <th className="py-2.5 px-3 font-semibold">Сумма кл.</th>
+                      <th className="py-2.5 px-3 font-semibold">Оплата факт</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ruFinMatches.map((m) => {
+                      const sel = selectedRuFinIds.has(m.id);
+                      return (
+                        <tr key={m.id} onClick={() => toggleRuFinId(m.id)}
+                          className={`border-b border-gray-200 cursor-pointer transition-colors ${sel ? "bg-purple-50 ring-1 ring-purple-400" : "hover:bg-gray-50"}`}>
+                          <td className="py-2.5 px-3 text-center">
+                            <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${sel ? "border-purple-500 bg-purple-500" : "border-gray-300"}`}>
+                              {sel && <span className="text-white text-xs">✓</span>}
+                            </div>
+                          </td>
+                          <td className="py-2.5 px-3 text-center text-xs font-medium text-gray-900">{m.customerPo}</td>
+                          <td className="py-2.5 px-3 text-center text-xs text-gray-700">{m.customer}</td>
+                          <td className="py-2.5 px-3 text-center text-xs text-gray-700">${fmt(parseFloat(m.customerAmount) || 0)}</td>
+                          <td className="py-2.5 px-3 text-center text-xs text-gray-700">
+                            {parseFloat(m.paymentFact) > 0 ? `₽${fmtRub(m.paymentFact)}` : "—"}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="text-center py-6 text-gray-400">
+                <div className="text-3xl mb-2">📋</div>
+                <p>Совпадений в Фин. результате не найдено</p>
+              </div>
+            )}
+          </div>
+
+          <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6">
+            <h3 className="text-[#1E3A5F] font-semibold text-base mb-4">Предпросмотр изменений</h3>
+            <div className="space-y-3 text-sm">
+              {selectedRuPoIds.size > 0 && (
+                <div className="flex items-start gap-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                  <span className="text-blue-600 font-bold text-lg mt-0.5">📦</span>
+                  <div>
+                    <p className="text-blue-900 font-medium">Open PO ({selectedRuPoIds.size} шт.)</p>
+                    <p className="text-blue-700 text-xs">Статус оплаты клиента → <strong>Paid</strong></p>
+                    <p className="text-blue-700 text-xs">Дата оплаты → <strong>{editParsed.date}</strong></p>
+                    <p className="text-blue-700 text-xs">Файл платёжки → будет прикреплён</p>
+                  </div>
+                </div>
+              )}
+              {selectedRuFinIds.size > 0 && (
+                <div className="flex items-start gap-3 p-3 bg-purple-50 border border-purple-200 rounded-lg">
+                  <span className="text-purple-600 font-bold text-lg mt-0.5">📊</span>
+                  <div>
+                    <p className="text-purple-900 font-medium">Фин. результат ({selectedRuFinIds.size} шт.)</p>
+                    <p className="text-purple-700 text-xs">Оплата факт → <strong>₽{fmtRub(editParsed.amount)}</strong></p>
+                    <p className="text-purple-700 text-xs">Дата оплаты → <strong>{editParsed.date}</strong></p>
+                    <p className="text-purple-700 text-xs">Файл платёжки → будет прикреплён (скачивание по клику на сумму)</p>
+                  </div>
+                </div>
+              )}
+              {selectedRuPoIds.size === 0 && selectedRuFinIds.size === 0 && (
+                <p className="text-gray-400 text-center py-4">Выберите PO и/или записи Фин. результата</p>
+              )}
+            </div>
+            {error && <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>}
+            <div className="flex justify-between mt-5">
+              <button onClick={() => setStep(1)} className="px-5 py-2.5 text-gray-600 hover:text-gray-900 text-sm transition-colors">← Назад</button>
+              <button onClick={handleApplyRu} disabled={applying || (selectedRuPoIds.size === 0 && selectedRuFinIds.size === 0)}
+                className="px-6 py-2.5 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2">
+                {applying ? (<><svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg> Применяю...</>) : "Применить"}
               </button>
             </div>
           </div>
@@ -4431,8 +4715,10 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setIn
           <div className="text-5xl mb-4">✅</div>
           <h3 className="text-[#1E3A5F] font-semibold text-xl mb-3">Платёж успешно импортирован</h3>
           <div className="space-y-2 text-sm text-gray-600 mb-6">
-            {result.poUpdated && <p>Open PO обновлён — статус оплаты: <strong className="text-emerald-600">Paid</strong></p>}
-            {result.infraOpCreated && <p>Операция записана в <strong>{selectedAccount}</strong> — новый баланс: <strong className="text-blue-600">${fmt(result.newBalance)}</strong></p>}
+            {mode === "foreign" && result.poUpdated && <p>Open PO обновлён — статус оплаты поставщику: <strong className="text-emerald-600">Paid</strong></p>}
+            {mode === "foreign" && result.infraOpCreated && <p>Операция записана в <strong>{selectedAccount}</strong> — новый баланс: <strong className="text-blue-600">${fmt(result.newBalance)}</strong></p>}
+            {mode === "ru" && result.poUpdated?.length > 0 && <p>Open PO ({result.poUpdated.length} шт.) — статус оплаты клиента: <strong className="text-emerald-600">Paid</strong></p>}
+            {mode === "ru" && result.finUpdated?.length > 0 && <p>Фин. результат ({result.finUpdated.length} шт.) — оплата факт: <strong className="text-emerald-600">₽{fmtRub(editParsed?.amount)}</strong></p>}
           </div>
           <button onClick={reset} className="px-6 py-2.5 bg-[#1E3A5F] hover:bg-[#2A4A6F] text-white rounded-lg text-sm font-medium transition-colors">
             Импортировать ещё
@@ -4571,6 +4857,25 @@ export default function App() {
       if (last.finResultId) syncFinResults((prev) => prev.map((r) => (r.id === last.finResultId ? { ...r, paymentFact: last.prev.paymentFact, paymentDocFileId: null, paymentDate: "" } : r)));
     }
     if (last.type === "infra_payment") syncBalances((prev) => prev.map((b) => (b.name === last.accName ? { ...b, balance: last.prev } : b)));
+    if (last.type === "import_apply_ru") {
+      api.undoImportRu({
+        prevPoStates: last.prevPoStates,
+        prevFinStates: last.prevFinStates,
+        importHistoryId: last.importHistoryId,
+      }).catch((err) => console.error("Undo import-ru error:", err));
+      if (last.prevPoStates?.length) {
+        syncOpenPo((prev) => prev.map((po) => {
+          const s = last.prevPoStates.find((p) => p.id === po.id);
+          return s ? { ...po, paymentStatusCustomer: s.paymentStatusCustomer, dateCustomerPaid: s.dateCustomerPaid, customerPaymentFileId: s.customerPaymentFileId } : po;
+        }));
+      }
+      if (last.prevFinStates?.length) {
+        syncFinResults((prev) => prev.map((fr) => {
+          const s = last.prevFinStates.find((p) => p.id === fr.id);
+          return s ? { ...fr, paymentFact: s.paymentFact, paymentDate: s.paymentDate, paymentDocFileId: s.paymentDocFileId, status: s.status || fr.status } : fr;
+        }));
+      }
+    }
     if (last.type === "import_apply") {
       api.undoImport({
         poId: last.poId,
@@ -4748,7 +5053,7 @@ export default function App() {
           <div style={{ display: activeTab === "openpo" ? "block" : "none" }}><OpenPO data={openPo} setData={syncOpenPo} pushLog={pushLog} finResults={finResults} setFinResults={syncFinResults} /></div>
           <div style={{ display: activeTab === "debts" ? "block" : "none" }}><Debts debts={debts} setDebts={syncDebts} pushLog={pushLog} finResults={finResults} setFinResults={syncFinResults} openPo={openPo} /></div>
           <div style={{ display: activeTab === "infra" ? "block" : "none" }}><Infrastructure balances={balances} setBalances={syncBalances} pushLog={pushLog} infraData={infraData} setInfraData={setInfraData} pendingTransfers={pendingTransfersGlobal} setPendingTransfers={setPendingTransfersGlobal} /></div>
-          <div style={{ display: activeTab === "import" ? "block" : "none" }}><BankImport balances={balances} setBalances={syncBalances} openPo={openPo} setOpenPo={syncOpenPo} infraData={infraData} setInfraData={setInfraData} pushLog={pushLog} /></div>
+          <div style={{ display: activeTab === "import" ? "block" : "none" }}><BankImport balances={balances} setBalances={syncBalances} openPo={openPo} setOpenPo={syncOpenPo} infraData={infraData} setInfraData={setInfraData} pushLog={pushLog} finResults={finResults} setFinResults={syncFinResults} /></div>
           </>)}
         </div>
       </div>

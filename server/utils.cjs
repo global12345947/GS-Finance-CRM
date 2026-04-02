@@ -23,7 +23,7 @@ const COLUMNS = {
     "supplier_name", "supplier_amount", "payment_status_supplier", "paying_company",
     "date_paid_supplier", "delivery_cost", "awb", "tracking", "comments", "mgmt_comments",
     "has_upd", "upd_num", "upd_date", "upd_file_id", "no_global_smart", "order_stage", "cancel_reason",
-    "logistics_plan", "supplier_amounts", "payment_file_id",
+    "logistics_plan", "supplier_amounts", "payment_file_id", "customer_payment_file_id",
   ]),
   fin_results: new Set([
     "type", "status", "customer", "customer_po", "order_date", "customer_amount",
