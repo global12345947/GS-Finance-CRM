@@ -22,7 +22,7 @@ const COLUMNS = {
     "date_customer_paid", "internal_po_ref", "date_placed_supplier", "resp_procurement",
     "supplier_name", "supplier_amount", "payment_status_supplier", "paying_company",
     "date_paid_supplier", "delivery_cost", "awb", "tracking", "comments", "mgmt_comments",
-    "has_upd", "upd_num", "upd_date", "upd_file_id", "no_global_smart", "order_stage", "cancel_reason",
+    "has_upd", "upd_num", "upd_date", "upd_file_id", "upd_lines", "no_global_smart", "order_stage", "cancel_reason",
     "logistics_plan", "supplier_amounts", "payment_file_id", "customer_payment_file_id",
   ]),
   fin_results: new Set([
@@ -30,7 +30,7 @@ const COLUMNS = {
     "order_status", "payment_fact", "payment_date", "payment_doc_file_id", "supplier_po",
     "supplier_amount", "supplier_amounts", "supplier", "final_buyer", "fin_agent", "payment_with_agent",
     "customs_cost", "delivery_cost", "margin", "net_profit", "vat_exempt", "comment",
-    "has_upd", "upd_num", "upd_date", "upd_file_id", "no_global_smart",
+    "has_upd", "upd_num", "upd_date", "upd_file_id", "no_global_smart", "force_closed",
   ]),
   debts: new Set([
     "company", "order", "amount", "due_date", "upd", "currency", "status",

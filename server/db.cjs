@@ -168,6 +168,8 @@ const initDB = async () => {
     const migrations = [
       { table: "open_po", column: "logistics_plan", type: "TEXT" },
       { table: "open_po", column: "supplier_amounts", type: "TEXT" },
+      { table: "open_po", column: "upd_lines", type: "TEXT" },
+      { table: "fin_results", column: "force_closed", type: "BOOLEAN DEFAULT FALSE" },
       { table: "infra_operations", column: "transfer_id", type: "INTEGER" },
       { table: "pending_transfers", column: "to_currency", type: "TEXT" },
       { table: "pending_transfers", column: "exchange_rate", type: "NUMERIC" },

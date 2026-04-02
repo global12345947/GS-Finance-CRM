@@ -1,0 +1,14 @@
+feat: multiple UPDs per PO, fin results corrections, debts refresh, Altura ops
+
+- Open PO: upd_lines support for per-supplier UPD tracking (multi-UPD per order)
+- Open PO: P2722725 — WOLFE + Pilot John shipped (UPD 3), AvionTEQ pending
+- Fin results: force_closed flag for historical domestic orders up to DOPOLNENIE-20
+- Fin results: RUB equivalent auto-fill for orders missing payment_fact
+- Fin results: cancel/delete/fix specific orders per business request
+- Fin results: fix PO13052025 as composite (3 suppliers), correct date 13.05.2025
+- Fin results: force-complete 4 historical EXP orders (P19113026, P2328126, P19125526, P20749026)
+- Debts: full refresh — 26 records, $937,798.24 total (A-tech, RApart, Utair, Belavia)
+- Infrastructure: 19 Altura GS USD operations (23.03-02.04.2026), balance $310,979.62
+- Infrastructure: USD to BAT conversion $3,063 linked via transfer_id
+- UI: SVG Russian flag in payment import (replaces emoji for Windows compatibility)
+- Scripts: add reimport:fin and patch scripts for manual data corrections

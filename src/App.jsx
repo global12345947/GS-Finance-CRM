@@ -296,6 +296,7 @@ const KanbanDropdown = ({ order, setData, pushLog, syncUpdToFinResults }) => {
 
 // ==================== ПАРСЕР EXTERNAL PO из строк с \n ====================
 // Формат: если PO начинается с "~" — он отменён (зачёркнут)
+// upd_lines: JSON-массив [{num, date, fileId}|null] — по одному на каждый External PO
 const parseExternalPOs = (order) => {
   const refs = (order.internalPoRef || "").split("\n").map((s) => s.trim()).filter(Boolean);
   const suppliers = (order.supplierName || "").split("\n").map((s) => s.trim()).filter(Boolean);
@@ -306,11 +307,25 @@ const parseExternalPOs = (order) => {
   const procurements = (order.respProcurement || "").split("\n").map((s) => s.trim()).filter(Boolean);
   const logistics = (order.logisticsPlan || "").split("\n").map((s) => s.trim()).filter(Boolean);
   const datesPaid = (order.datePaidSupplier || "").split("\n").map((s) => s.trim());
+
+  // Парсим per-PO УПД из upd_lines (JSON-массив)
+  let updLinesArr = [];
+  try {
+    const raw = order.updLines;
+    if (raw) updLinesArr = typeof raw === "string" ? JSON.parse(raw) : (Array.isArray(raw) ? raw : []);
+  } catch { updLinesArr = []; }
+
   const count = Math.max(refs.length, 1);
   const result = [];
   for (let i = 0; i < count; i++) {
     const rawPo = refs[i] || "";
     const cancelled = rawPo.startsWith("~");
+    const updEntry = updLinesArr[i] || null;
+    // Обратная совместимость: если нет upd_lines, но есть глобальный hasUpd — применяем к первому PO
+    const legacyUpd = (!updLinesArr.length && order.hasUpd && count === 1 && i === 0)
+      ? { num: order.updNum || "", date: order.updDate || "", fileId: order.updFileId || null }
+      : null;
+    const eff = updEntry || legacyUpd;
     result.push({
       po: cancelled ? rawPo.substring(1) : rawPo,
       supplier: suppliers[i] || (suppliers.length === 1 ? suppliers[0] : ""),
@@ -323,6 +338,10 @@ const parseExternalPOs = (order) => {
       logisticsPlan: logistics[i] || (logistics.length === 1 ? logistics[0] : ""),
       cancelled,
       cancelReason: "",
+      updNum: eff?.num || "",
+      updDate: eff?.date || "",
+      updFileId: eff?.fileId || null,
+      hasUpd: !!(eff?.num || eff?.fileId),
     });
   }
   return result;
@@ -356,6 +375,25 @@ const parseLogisticsPlan = (raw) => {
   const lines = str.split(/\\n|\n/).map((l) => l.trim()).filter(Boolean);
   if (lines.length <= 1) return { plan: str, actual: "" };
   return { plan: lines[0], actual: lines.slice(1).join("; ") };
+};
+
+/** Сортировка Open PO: дата заказа в БД может быть ISO (2025-01-29) или ru (29.01.2025) */
+const parseOpenPoDateMs = (raw) => {
+  if (raw == null) return Number.MAX_SAFE_INTEGER;
+  const s = String(raw).trim();
+  if (!s) return Number.MAX_SAFE_INTEGER;
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) {
+    const t = Date.UTC(+iso[1], +iso[2] - 1, +iso[3]);
+    return Number.isNaN(t) ? Number.MAX_SAFE_INTEGER : t;
+  }
+  const ru = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})/);
+  if (ru) {
+    const t = Date.UTC(+ru[3], +ru[2] - 1, +ru[1]);
+    return Number.isNaN(t) ? Number.MAX_SAFE_INTEGER : t;
+  }
+  const fallback = Date.parse(s);
+  return Number.isNaN(fallback) ? Number.MAX_SAFE_INTEGER : fallback;
 };
 
 // ==================== ФИЛЬТР КОЛОНОК (Google Sheets style) ====================
@@ -485,7 +523,7 @@ const getFinFilterValue = (o, colKey) => {
 };
 
 // ==================== АВТО-ДЕБИТОРКА (из Фин. результат) ====================
-// Заказы с УПД, но без оплаты — автоматически попадают в дебиторку
+// Отгрузка по УПД есть, а оплаты с платёжкой в Фин. результате ещё нет — строка висит в дебиторке до оплаты
 
 // Парсим NET дни из paymentStatusCustomer (NET 5, NET 7, NET 10, NET 30)
 const parseNetDays = (paymentStatus) => {
@@ -529,13 +567,17 @@ const getAutoDebts = (finResults, existingDebts, openPoData) => {
 
   return finResults
     .filter((r) => {
-      // Авто-дебиторка только для УПД, загруженных через CRM (есть файл)
-      if (!r.updFileId) return false;
       if (r.status === "cancelled") return false;
       if (r.noGlobalSmart) return false;
-      const pf = typeof r.paymentFact === "number" ? r.paymentFact : parseFloat(r.paymentFact) || 0;
-      if (pf > 0) return false;
+      // Уже закрыт по финансам: оплата + платёжка (+ УПД для заказов GS)
+      if (isFinOrderBusinessClosed(r)) return false;
       if (existingOrders.has(r.customerPo)) return false;
+      // Отгрузка по УПД (CRM, файл УПД или текст статуса из Excel) — но денег от клиента ещё нет / нет платёжки
+      const shipped =
+        r.hasUpd ||
+        !!r.updFileId ||
+        (r.orderStatus && /УПД/i.test(r.orderStatus));
+      if (!shipped) return false;
       return true;
     })
     .map((r) => {
@@ -561,6 +603,30 @@ const getAutoDebts = (finResults, existingDebts, openPoData) => {
       };
     });
 };
+
+/** Заказ в «Фин. результат» считается полностью закрытым только с оплатой и банковской платёжкой; для GS ещё нужен УПД (или текст УПД в статусе). */
+function isFinOrderBusinessClosed(r) {
+  // Принудительно закрытые исторические записи (force_closed = true)
+  if (r.forceClosed) return true;
+  const pf = typeof r.paymentFact === "number" ? r.paymentFact : parseFloat(r.paymentFact) || 0;
+  const hasDoc = !!r.paymentDocFileId;
+  // Без участия GS: нужна только оплата (без платёжки)
+  if (r.noGlobalSmart) {
+    return pf > 0;
+  }
+  // Стандарт: оплата + платёжный документ + УПД
+  if (pf <= 0 || !hasDoc) return false;
+  const hasUpd = r.hasUpd || (r.orderStatus && /УПД/i.test(r.orderStatus));
+  return !!hasUpd;
+}
+
+/** Убирает ошибочный статус «Выполнен», если нет оплаты с платёжкой (Open PO может быть уже с УПД). */
+function normalizeFinResultRowStatus(r) {
+  if (r.status === "cancelled") return r;
+  if (r.status !== "completed") return r;
+  if (isFinOrderBusinessClosed(r)) return r;
+  return { ...r, status: "active" };
+}
 
 // ==================== UI КОМПОНЕНТЫ ====================
 const StatusBadge = ({ status }) => {
@@ -1032,7 +1098,8 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts, acquireLock, rele
 
   const filtered = useMemo(() => {
     let items = [...data];
-    items.sort((a, b) => (a.orderDate || "").localeCompare(b.orderDate || ""));
+    // Как в Open PO: сортировка по дате заказа (ISO или dd.mm.yyyy), не строкой
+    items.sort((a, b) => parseOpenPoDateMs(a.orderDate) - parseOpenPoDateMs(b.orderDate));
     if (filter === "active") items = items.filter((o) => o.status === "active");
     if (filter === "completed") items = items.filter((o) => o.status === "completed");
     if (filter === "cancelled") items = items.filter((o) => o.status === "cancelled");
@@ -1098,19 +1165,23 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts, acquireLock, rele
     setPayForm({ amount: "", date: "", file: null });
   };
 
-  // Kanban-статус: переход на «Выполнен» требует проверки
+  // Kanban-статус: «Выполнен» в Фин. результате только при УПД + оплата с банковской платёжкой (Open PO «закрыт» по УПД отдельно)
   const handleFinStage = (r, newStatus) => {
     if (newStatus === "completed") {
-      const hasUpdOrGS = r.hasUpd || r.noGlobalSmart;
-      const hasPay = parseFloat(r.paymentFact) > 0;
-      // Если заказ «без участия GS» — можно закрывать сразу
+      const pf = parseFloat(r.paymentFact) || 0;
+      const hasPayDoc = !!r.paymentDocFileId;
+      const hasPayClosed = pf > 0 && hasPayDoc;
+      const hasUpdOrText = r.hasUpd || (r.orderStatus && /УПД/i.test(r.orderStatus));
       if (r.noGlobalSmart) {
-    pushLog({ type: "fin_status", id: r.id, prev: r.status });
+        if (!hasPayClosed) {
+          setCompleteModal(r);
+          return;
+        }
+        pushLog({ type: "fin_status", id: r.id, prev: r.status });
         setData((prev) => prev.map((x) => (x.id === r.id ? { ...x, status: "completed" } : x)));
         return;
       }
-      // Иначе — показываем модалку с проверкой условий
-      if (!hasUpdOrGS || !hasPay) {
+      if (!hasUpdOrText || !hasPayClosed) {
         setCompleteModal(r);
         return;
       }
@@ -1132,6 +1203,7 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts, acquireLock, rele
   // Оставляем для случая, когда оба условия выполнены (например через edit)
   const confirmFinComplete = () => {
     if (!completeModal) return;
+    if (!isFinOrderBusinessClosed(completeModal)) return;
     pushLog({ type: "fin_status", id: completeModal.id, prev: completeModal.status });
     setData((prev) => prev.map((x) => (x.id === completeModal.id ? { ...x, status: "completed" } : x)));
     setCompleteModal(null);
@@ -1242,7 +1314,7 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts, acquireLock, rele
       )
     );
 
-    if (setDebts && newPaymentFact > 0 && oldPaymentFact === 0 && editModal.customerPo) {
+    if (setDebts && newPaymentFact > 0 && finalPayDocFileId && oldPaymentFact === 0 && editModal.customerPo) {
       setDebts((prev) => prev.map((d) => {
         if (d.order === editModal.customerPo && d.status === "open") {
           return { ...d, status: "closed", payDocFileId: finalPayDocFileId, payDate: editForm.paymentDate, payComment: `Оплачено через Фин. результат: ${newPaymentFact}` };
@@ -1537,12 +1609,18 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts, acquireLock, rele
       {/* Модал подтверждения «Выполнен» */}
       <Modal isOpen={!!completeModal} onClose={() => setCompleteModal(null)} title={`Подтверждение — ${completeModal?.customerPo || ""}`}>
         {completeModal && (() => {
-          const hasUpdOrGS = completeModal.hasUpd || completeModal.noGlobalSmart;
-          const hasPay = parseFloat(completeModal.paymentFact) > 0;
+          const hasUpdOrGS =
+            completeModal.noGlobalSmart ||
+            completeModal.hasUpd ||
+            (completeModal.orderStatus && /УПД/i.test(completeModal.orderStatus));
+          const pf = parseFloat(completeModal.paymentFact) || 0;
+          const hasPayDoc = !!completeModal.paymentDocFileId;
+          const hasPayClosed = pf > 0 && hasPayDoc;
+          const canClose = completeModal.noGlobalSmart ? hasPayClosed : hasUpdOrGS && hasPayClosed;
           return (
         <div className="space-y-4">
               <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-amber-300 text-sm">
-                Для перевода заказа в статус «Выполнен» должны быть выполнены оба условия:
+                В «Фин. результат» заказ закрывается только после оплаты клиента с банковской платёжкой (и УПД для заказов GS). В Open PO отгрузка по УПД учитывается отдельно.
           </div>
               <div className="space-y-3">
                 <div className={`flex items-center gap-3 p-3 rounded-lg border ${hasUpdOrGS ? "border-emerald-500/30 bg-emerald-500/5" : "border-red-500/30 bg-red-500/5"}`}>
@@ -1551,39 +1629,43 @@ const FinResults = ({ data, setData, pushLog, debts, setDebts, acquireLock, rele
                   </div>
           <div>
                     <div className={`text-sm font-medium ${hasUpdOrGS ? "text-emerald-300" : "text-red-300"}`}>
-                      {completeModal.noGlobalSmart ? "Заказ без участия GS" : "УПД загружена"}
+                      {completeModal.noGlobalSmart ? "Заказ без участия GS" : "УПД (отгрузка)"}
           </div>
                     <div className="text-[10px] text-slate-500 mt-0.5">
                       {hasUpdOrGS
-                        ? (completeModal.noGlobalSmart ? "🔹 Без участия GS" : `✅ УПД №${completeModal.updNum} от ${completeModal.updDate}`)
-                        : "УПД подгружается автоматически из Open PO"}
+                        ? (completeModal.noGlobalSmart ? "🔹 Без участия GS" : `✅ УПД №${completeModal.updNum || "—"} от ${completeModal.updDate || "—"}`)
+                        : "Нужен УПД в CRM или в статусе заказа (Excel)"}
                     </div>
                   </div>
                 </div>
-                <div className={`flex items-center gap-3 p-3 rounded-lg border ${hasPay ? "border-emerald-500/30 bg-emerald-500/5" : "border-red-500/30 bg-red-500/5"}`}>
-                  <div className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 ${hasPay ? "bg-emerald-500" : "bg-red-500/30"}`}>
-                    {hasPay ? <span className="text-white text-xs">✓</span> : <span className="text-red-400 text-xs">✕</span>}
+                <div className={`flex items-center gap-3 p-3 rounded-lg border ${hasPayClosed ? "border-emerald-500/30 bg-emerald-500/5" : "border-red-500/30 bg-red-500/5"}`}>
+                  <div className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 ${hasPayClosed ? "bg-emerald-500" : "bg-red-500/30"}`}>
+                    {hasPayClosed ? <span className="text-white text-xs">✓</span> : <span className="text-red-400 text-xs">✕</span>}
                   </div>
                   <div>
-                    <div className={`text-sm font-medium ${hasPay ? "text-emerald-300" : "text-red-300"}`}>
-                      Оплата получена
+                    <div className={`text-sm font-medium ${hasPayClosed ? "text-emerald-300" : "text-red-300"}`}>
+                      Оплата с платёжкой
                     </div>
                     <div className="text-[10px] text-slate-500 mt-0.5">
-                      {hasPay ? `₽${fmt(completeModal.paymentFact)}` : "Оплата от клиента ещё не внесена"}
+                      {hasPayClosed
+                        ? `₽${fmt(completeModal.paymentFact)} (файл прикреплён)`
+                        : pf > 0 && !hasPayDoc
+                          ? "Указана сумма без банковской платёжки — внесите через «💳 Внести»"
+                          : "Оплата от клиента не внесена"}
                     </div>
                   </div>
                 </div>
               </div>
-              {(!hasUpdOrGS || !hasPay) && (
+              {!canClose && (
                 <div className="bg-rose-500/10 border border-rose-500/20 rounded-lg p-3 text-rose-300 text-xs">
-                  ⛔ Невозможно закрыть заказ. Для перевода в «Выполнен» необходимы оба условия:
-                  {!hasUpdOrGS && <div className="mt-1">• УПД должна быть загружена в Open PO</div>}
-                  {!hasPay && <div className="mt-1">• Оплата от клиента должна быть внесена</div>}
+                  ⛔ Нельзя перевести в «Выполнен», пока не выполнены условия. Без оплаты заказ с отгрузкой попадёт в дебиторскую задолженность.
+                  {!completeModal.noGlobalSmart && !hasUpdOrGS && <div className="mt-1">• Нужен УПД (Open PO / статус)</div>}
+                  {!hasPayClosed && <div className="mt-1">• Нужна оплата с приложением банковской платёжки</div>}
                 </div>
               )}
           <div className="flex justify-end gap-3">
                 <button onClick={() => setCompleteModal(null)} className="px-4 py-2 text-slate-400 hover:text-white text-sm">Закрыть</button>
-                <button onClick={confirmFinComplete} disabled={!hasUpdOrGS || !hasPay}
+                <button onClick={confirmFinComplete} disabled={!canClose}
                   className="px-6 py-2 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors">
                   ✅ Подтвердить «Выполнен»
             </button>
@@ -2042,8 +2124,8 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults, acquireLock
   const [typeFilter, setTypeFilter] = useState("domestic");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(-1); // -1 = auto last page
-  const [updModal, setUpdModal] = useState(null);
-  const [updForm, setUpdForm] = useState({ num: "", date: "", file: null, noGS: false });
+  const [updModal, setUpdModal] = useState(null); // ID заказа для управления отгрузкой
+  const [updForm, setUpdForm] = useState({ extIdx: null, num: "", date: "", file: null });
   const [detailModal, setDetailModal] = useState(null);
   const [editModal, setEditModal] = useState(null);
   const [editForm, setEditForm] = useState({});
@@ -2130,7 +2212,6 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults, acquireLock
     let pool = [...data];
     if (typeFilter === "domestic") pool = pool.filter((o) => o.type === "domestic");
     if (typeFilter === "export") pool = pool.filter((o) => o.type === "export");
-    if (typeFilter === "yoon") pool = pool.filter((o) => o.type === "yoon");
     const map = {};
     FILTER_COL_KEYS.forEach((col) => {
       const vals = new Set();
@@ -2141,11 +2222,11 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults, acquireLock
   }, [data, typeFilter]);
 
   const filtered = useMemo(() => {
+    const orderTime = (o) => parseOpenPoDateMs(o.dateOrdered);
     let items = [...data];
-    items.sort((a, b) => (a.dateOrdered || "").localeCompare(b.dateOrdered || ""));
+    items.sort((a, b) => orderTime(a) - orderTime(b));
     if (typeFilter === "domestic") items = items.filter((o) => o.type === "domestic");
     if (typeFilter === "export") items = items.filter((o) => o.type === "export");
-    if (typeFilter === "yoon") items = items.filter((o) => o.type === "yoon");
     if (filter === "active") items = items.filter((o) => o.status === "active");
     if (filter === "completed") items = items.filter((o) => o.status === "completed");
     if (filter === "cancelled") items = items.filter((o) => o.status === "cancelled");
@@ -2178,44 +2259,56 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults, acquireLock
   const slice = filtered.slice(effectivePage * PP, (effectivePage + 1) * PP);
 
   const doUpd = async () => {
-    if (!updModal) return;
-    if (!updForm.noGS && (!updForm.file || !updForm.num || !updForm.date)) return;
+    if (!updModal || updForm.extIdx === null) return;
+    if (!updForm.file || !updForm.num || !updForm.date) return;
 
-    pushLog({
-      type: "po_upd",
-      id: updModal.id,
-      prev: { hasUpd: updModal.hasUpd, updNum: updModal.updNum, updDate: updModal.updDate, mgmtComments: updModal.mgmtComments, noGlobalSmart: updModal.noGlobalSmart },
-    });
+    const order = data.find((r) => r.id === updModal) || null;
+    if (!order) return;
+    const extIdx = updForm.extIdx;
 
-    if (updForm.noGS) {
-      setData((prev) =>
-        prev.map((r) =>
-          r.id === updModal.id
-            ? { ...r, hasUpd: true, noGlobalSmart: true, updNum: "Без участия GS", updDate: "", updFileId: null,
-                mgmtComments: `${r.mgmtComments ? r.mgmtComments + "\n" : ""}Без участия GS` }
-            : r
-        )
-      );
-      syncUpdToFinResults(updModal.internalPo, true, "Без участия GS", "", null, true);
-    } else {
+    try {
+      const uploaded = await api.uploadFile(updForm.file, "upd", order.id);
+
+      // Парсим текущий массив upd_lines
+      const exts = parseExternalPOs(order);
+      let rawArr;
       try {
-        const uploaded = await api.uploadFile(updForm.file, "upd", updModal.id);
-        setData((prev) =>
-          prev.map((r) =>
-            r.id === updModal.id
-              ? { ...r, hasUpd: true, noGlobalSmart: false, updNum: updForm.num, updDate: updForm.date, updFileId: uploaded.id,
-                  mgmtComments: `${r.mgmtComments ? r.mgmtComments + "\n" : ""}УПД №${updForm.num} от ${updForm.date}` }
-              : r
-          )
-        );
-        syncUpdToFinResults(updModal.internalPo, true, updForm.num, updForm.date, uploaded.id, false);
-      } catch (err) {
-        console.error("Ошибка загрузки УПД:", err);
-        return;
+        rawArr = order.updLines ? JSON.parse(order.updLines) : [];
+        while (rawArr.length < exts.length) rawArr.push(null);
+      } catch {
+        rawArr = new Array(exts.length).fill(null);
       }
+
+      rawArr[extIdx] = { num: updForm.num, date: updForm.date, fileId: uploaded.id };
+      const newUpdLines = JSON.stringify(rawArr);
+
+      // Проверяем, все ли активные PO теперь отгружены
+      const activeExts = exts.filter((e) => !e.cancelled);
+      const allNowShipped = activeExts.every((e) => {
+        const realIdx = exts.indexOf(e);
+        return rawArr[realIdx] !== null;
+      });
+
+      const firstShipped = rawArr.find((u) => u !== null);
+      const updates = {
+        updLines: newUpdLines,
+        hasUpd: true,
+        updNum: firstShipped?.num || updForm.num,
+        updDate: firstShipped?.date || updForm.date,
+        updFileId: firstShipped?.fileId || uploaded.id,
+      };
+      if (allNowShipped) {
+        updates.orderStage = "done";
+        updates.status = "completed";
+      }
+
+      pushLog({ type: "po_upd", id: order.id, prev: { hasUpd: order.hasUpd, updNum: order.updNum, updLines: order.updLines, orderStage: order.orderStage } });
+      setData((prev) => prev.map((r) => (r.id === order.id ? { ...r, ...updates } : r)));
+      syncUpdToFinResults(order.internalPo, true, updates.updNum, updates.updDate, updates.updFileId, false);
+      setUpdForm({ extIdx: null, num: "", date: "", file: null });
+    } catch (err) {
+      console.error("Ошибка загрузки УПД:", err);
     }
-    setUpdModal(null);
-    setUpdForm({ num: "", date: "", file: null, noGS: false });
   };
 
   const cancelOrder = () => {
@@ -2414,12 +2507,11 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults, acquireLock
     <div className="space-y-4">
       {/* Фильтры и поиск — стиль как в Фин. результат */}
       <div className="flex flex-wrap items-center gap-3">
-        {/* Вкладки типа: ROT / EXP / YOON */}
+        {/* Вкладки типа: ROT / EXP */}
         <div className="flex gap-1 bg-[#1E3A5F] p-1 rounded-lg">
           {[
             { k: "domestic", l: `ROT (${data.filter((o) => o.type === "domestic").length})` },
             { k: "export", l: `EXP (${data.filter((o) => o.type === "export").length})` },
-            { k: "yoon", l: `YOON (${data.filter((o) => o.type === "yoon").length})` },
           ].map((f) => (
             <button key={f.k} onClick={() => { setTypeFilter(f.k); setPage(-1); }}
               className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${
@@ -2735,22 +2827,26 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults, acquireLock
                     <td className="py-2 px-2 text-center" onClick={(e) => e.stopPropagation()}>
                       <KanbanDropdown order={o} setData={setData} pushLog={pushLog} syncUpdToFinResults={syncUpdToFinResults} />
                     </td>
-                    <td className="py-2 px-2 text-center">
+                    <td className="py-2 px-2 text-center cursor-pointer" onClick={(e) => { e.stopPropagation(); setUpdModal(o.id); setUpdForm({ extIdx: null, num: "", date: "", file: null }); }}>
                       {o.noGlobalSmart ? (
-                        <span className="text-blue-600 text-xs font-medium cursor-help" title="Заказ без участия Global Smart">
-                          🔹 Без участия GS
-              </span>
-                      ) : o.hasUpd ? (
-                        <div className="text-emerald-600 text-xs leading-tight">
-                          <span className="cursor-help" title={`УПД №${o.updNum} от ${o.updDate}`}>
-                            ✅ <span className="text-emerald-700 font-medium">УПД №{o.updNum || "—"} от {o.updDate || "—"}</span>
-                          </span>
-                          {o.updFileId && (
-                            <button onClick={(e) => { e.stopPropagation(); downloadFile(o.updFileId, `УПД_${o.updNum || o.internalPo}.pdf`); }}
-                              className="ml-1 text-blue-500 hover:text-blue-700 text-[10px] font-medium" title="Скачать УПД">⬇</button>
-                          )}
-                        </div>
-                      ) : <span className="text-gray-300">—</span>}
+                        <span className="text-blue-600 text-xs font-medium" title="Заказ без участия Global Smart">🔹 Без GS</span>
+                      ) : (() => {
+                        const _exts = parseExternalPOs(o);
+                        const _active = _exts.filter((e) => !e.cancelled);
+                        if (!_active.length) return <button className="text-xs text-blue-500 hover:text-blue-700 font-medium">📤 УПД</button>;
+                        const _shipped = _active.filter((e) => e.hasUpd).length;
+                        const _total = _active.length;
+                        if (_shipped === 0) return <button className="text-xs text-blue-500 hover:text-blue-700 font-medium">📤 Загрузить УПД</button>;
+                        if (_shipped === _total) return (
+                          <div className="text-emerald-600 text-xs leading-tight">
+                            {_total === 1 ? (
+                              <><div className="cursor-help">✅ УПД №{_active[0].updNum || "—"} от {_active[0].updDate || "—"}</div>
+                              {_active[0].updFileId && <button onClick={(e) => { e.stopPropagation(); downloadFile(_active[0].updFileId, `УПД_${_active[0].updNum}.pdf`); }} className="text-blue-500 hover:text-blue-700 text-[10px]">⬇</button>}</>
+                            ) : <span>✅ {_shipped}/{_total} отгружено</span>}
+                          </div>
+                        );
+                        return <div className="text-amber-600 text-xs font-medium cursor-pointer">📦 {_shipped}/{_total} отгружено</div>;
+                      })()}
                     </td>
                     <td className="py-2 px-2 text-center" onClick={(e) => e.stopPropagation()}>
                       <div className="flex items-center justify-center gap-1">
@@ -2831,32 +2927,121 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults, acquireLock
         </div>
       </Modal>
 
-      {/* Модал загрузки УПД */}
-      <Modal isOpen={!!updModal} onClose={() => setUpdModal(null)} title={`Загрузка УПД — ${updModal?.internalPo || ""}`}>
-        <div className="space-y-4">
-          <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 text-blue-300 text-sm">
-            📌 Логист загружает скан УПД. Данные автоматически обновятся в <b>Фин. результат</b> и <b>Дебиторке</b>.
-          </div>
-          <InputField label="Номер УПД *" value={updForm.num} onChange={(v) => setUpdForm({ ...updForm, num: v })} placeholder="Напр.: 153" disabled={updForm.noGS} />
-          <InputField label="Дата УПД *" value={updForm.date} onChange={(v) => setUpdForm({ ...updForm, date: v })} type="date" disabled={updForm.noGS} />
-          <div>
-            <label className={`text-xs text-slate-400 mb-1 block ${updForm.noGS ? "opacity-40" : ""}`}>Скан УПД (PDF/JPG/PNG) *</label>
-            <input type="file" accept=".pdf,.jpg,.jpeg,.png" onChange={(e) => setUpdForm({ ...updForm, file: e.target.files[0] })} className={`w-full text-sm text-slate-300 ${updForm.noGS ? "opacity-40" : ""}`} disabled={updForm.noGS} />
-          </div>
-          <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
-            <input type="checkbox" checked={updForm.noGS || false} onChange={(e) => setUpdForm({ ...updForm, noGS: e.target.checked, ...(e.target.checked ? { num: "", date: "", file: null } : {}) })}
-              className="accent-blue-500 w-4 h-4 rounded" />
-            Заказ без участия Global Smart
-          </label>
-          <div className="flex justify-end gap-3">
-            <button onClick={() => setUpdModal(null)} className="px-4 py-2 text-slate-400 hover:text-white text-sm">Отмена</button>
-            <button onClick={doUpd} disabled={!updForm.noGS && (!updForm.file || !updForm.num || !updForm.date)}
-              className="px-6 py-2 bg-blue-500 hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors">
-              {updForm.noGS ? "Подтвердить" : "Загрузить"}
-            </button>
-          </div>
-        </div>
-      </Modal>
+      {/* Модал управления отгрузкой / УПД (per-PO) */}
+      {(() => {
+        const _updOrder = updModal ? data.find((r) => r.id === updModal) : null;
+        if (!_updOrder) return null;
+        const _exts = parseExternalPOs(_updOrder);
+        const _active = _exts.filter((e) => !e.cancelled);
+        const _shippedCount = _active.filter((e) => e.hasUpd).length;
+        const _allShipped = _shippedCount === _active.length && _active.length > 0;
+        return (
+          <Modal isOpen={!!updModal} onClose={() => { setUpdModal(null); setUpdForm({ extIdx: null, num: "", date: "", file: null }); }}
+            title={`Управление отгрузкой — ${_updOrder.internalPo || ""}`} wide>
+            <div className="space-y-4">
+              <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 text-blue-300 text-sm">
+                📌 Загрузите УПД по каждой позиции поставщика. После отгрузки всех позиций заказ перейдёт в статус «Завершён».
+              </div>
+
+              {/* Вариант «Без участия GS» */}
+              <label className="flex items-center gap-3 p-3 rounded-lg border border-slate-700 bg-slate-800/50 cursor-pointer select-none">
+                <input type="checkbox" checked={_updOrder.noGlobalSmart || false}
+                  onChange={(e) => {
+                    const updates = { noGlobalSmart: e.target.checked, hasUpd: e.target.checked,
+                      orderStage: e.target.checked ? "done" : _updOrder.orderStage,
+                      status: e.target.checked ? "completed" : _updOrder.status };
+                    pushLog({ type: "po_upd", id: _updOrder.id, prev: { hasUpd: _updOrder.hasUpd, noGlobalSmart: _updOrder.noGlobalSmart, orderStage: _updOrder.orderStage } });
+                    setData((prev) => prev.map((r) => (r.id === _updOrder.id ? { ...r, ...updates } : r)));
+                    syncUpdToFinResults(_updOrder.internalPo, e.target.checked, "Без участия GS", "", null, true);
+                  }}
+                  className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-500" />
+                <div>
+                  <div className="text-sm text-white font-medium">Заказ без участия Global Smart</div>
+                  <div className="text-xs text-slate-500 mt-0.5">УПД не требуется — заказ выполнен минуя GS</div>
+                </div>
+              </label>
+
+              {/* Список позиций External PO */}
+              {!_updOrder.noGlobalSmart && (
+                <div className="space-y-2">
+                  <div className="text-xs text-slate-400 font-semibold uppercase tracking-wider">
+                    Позиции поставщиков ({_shippedCount}/{_active.length} отгружено)
+                  </div>
+                  {_exts.map((ext, i) => {
+                    if (ext.cancelled) return (
+                      <div key={i} className="opacity-40 rounded-lg border border-slate-700 p-2 flex items-center gap-2 text-xs">
+                        <span className="line-through text-slate-500 font-mono">{ext.po}</span>
+                        <span className="text-red-400">отменён</span>
+                      </div>
+                    );
+                    const isSelected = updForm.extIdx === i;
+                    return (
+                      <div key={i} className={`rounded-lg border p-3 transition-colors ${ext.hasUpd ? "border-emerald-600/40 bg-emerald-500/5" : "border-slate-600 bg-slate-700/30"}`}>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-mono text-sm text-slate-200">{ext.po || `Позиция ${i + 1}`}</span>
+                            {ext.supplier && <span className="text-xs text-slate-400">{ext.supplier}</span>}
+                            {ext.supplierAmount && <span className="text-xs text-slate-400 font-medium">${ext.supplierAmount}</span>}
+                          </div>
+                          {ext.hasUpd ? (
+                            <div className="flex items-center gap-1 shrink-0">
+                              <span className="text-emerald-400 text-xs">✅ УПД №{ext.updNum} от {ext.updDate}</span>
+                              {ext.updFileId && (
+                                <button onClick={() => downloadFile(ext.updFileId, `УПД_${ext.updNum || ext.po}.pdf`)}
+                                  className="text-blue-400 hover:text-blue-300 text-xs ml-1" title="Скачать">⬇</button>
+                              )}
+                            </div>
+                          ) : (
+                            <button onClick={() => setUpdForm({ extIdx: isSelected ? null : i, num: "", date: "", file: null })}
+                              className={`text-xs px-2 py-1 rounded transition-colors shrink-0 ${isSelected ? "bg-slate-600 text-slate-300" : "bg-blue-500 hover:bg-blue-600 text-white"}`}>
+                              {isSelected ? "Свернуть" : "📤 Загрузить УПД"}
+                            </button>
+                          )}
+                        </div>
+                        {isSelected && (
+                          <div className="mt-3 p-3 bg-slate-800/60 rounded-lg border border-slate-600 space-y-3">
+                            <div className="grid grid-cols-2 gap-3">
+                              <div>
+                                <label className="text-xs text-slate-400 mb-1 block">Номер УПД *</label>
+                                <input type="text" value={updForm.num} onChange={(e) => setUpdForm({ ...updForm, num: e.target.value })}
+                                  className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded text-sm text-white focus:outline-none focus:border-blue-500"
+                                  placeholder="Напр.: 153" />
+                              </div>
+                              <div>
+                                <label className="text-xs text-slate-400 mb-1 block">Дата УПД *</label>
+                                <input type="date" value={updForm.date} onChange={(e) => setUpdForm({ ...updForm, date: e.target.value })}
+                                  className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded text-sm text-white focus:outline-none focus:border-blue-500" />
+                              </div>
+                            </div>
+                            <div>
+                              <label className="text-xs text-slate-400 mb-1 block">Скан УПД (PDF/JPG/PNG) *</label>
+                              <input type="file" accept=".pdf,.jpg,.jpeg,.png"
+                                onChange={(e) => setUpdForm({ ...updForm, file: e.target.files[0] })}
+                                className="w-full text-xs text-slate-300 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-xs file:font-medium file:bg-blue-500 file:text-white file:cursor-pointer hover:file:bg-blue-600" />
+                            </div>
+                            <div className="flex justify-end">
+                              <button onClick={doUpd} disabled={!updForm.file || !updForm.num || !updForm.date}
+                                className="px-4 py-2 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded text-sm font-medium transition-colors">
+                                ✅ Загрузить УПД
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {_allShipped && (
+                <div className="bg-emerald-500/10 border border-emerald-500/20 p-3 rounded-lg text-emerald-300 text-sm">
+                  ✅ Все позиции отгружены! Заказ автоматически переведён в статус «Завершён».
+                </div>
+              )}
+            </div>
+          </Modal>
+        );
+      })()}
 
       {/* Модал деталей PO */}
       <Modal isOpen={!!detailModal} onClose={() => setDetailModal(null)} title={`Заказ ${detailModal?.internalPo || ""}`} wide>
@@ -2885,7 +3070,7 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults, acquireLock
             <div className="border-t border-slate-700/50 pt-4">
               <div className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">External PO (заказы поставщикам)</div>
               {parseExternalPOs(detailModal).map((ext, ei) => (
-                <div key={ei} className={`bg-slate-700/30 rounded-lg p-3 mb-2 grid grid-cols-2 gap-2 text-sm`}>
+                <div key={ei} className={`rounded-lg p-3 mb-2 grid grid-cols-2 gap-2 text-sm border ${ext.hasUpd ? "border-emerald-600/30 bg-emerald-500/5" : ext.cancelled ? "border-red-600/20 bg-slate-800/30 opacity-60" : "border-slate-600/50 bg-slate-700/30"}`}>
                   <div><div className="text-slate-500 text-[10px] mb-0.5">External PO</div><div className={`text-slate-200 font-mono ${ext.cancelled ? "line-through text-gray-500" : ""}`}>{ext.po || "—"}{ext.cancelled ? " (отменён)" : ""}</div></div>
                   <div><div className="text-slate-500 text-[10px] mb-0.5">Поставщик</div><div className="text-slate-200">{ext.supplier || "—"}</div></div>
                   <div><div className="text-slate-500 text-[10px] mb-0.5">Сумма ($)</div><div className="text-slate-200 font-bold">{ext.supplierAmount ? "$" + fmt(parseFloat(ext.supplierAmount) || 0) : "—"}</div></div>
@@ -2894,6 +3079,17 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults, acquireLock
                   <div><div className="text-slate-500 text-[10px] mb-0.5">Дата размещения</div><div className="text-slate-200">{ext.datePlaced || "—"}</div></div>
                   <div><div className="text-slate-500 text-[10px] mb-0.5">Resp. Procurement</div><div className="text-slate-200">{ext.respProcurement || "—"}</div></div>
                   <div className="col-span-2"><div className="text-slate-500 text-[10px] mb-0.5">📦 План логистики</div><div className="text-slate-200">{ext.logisticsPlan || "—"}</div></div>
+                  {!ext.cancelled && (
+                    <div className="col-span-2 border-t border-slate-700/30 pt-2">
+                      <div className="text-slate-500 text-[10px] mb-0.5">Отгрузка (УПД)</div>
+                      {ext.hasUpd ? (
+                        <div className="flex items-center gap-2">
+                          <span className="text-emerald-400 text-xs">✅ УПД №{ext.updNum || "—"} от {ext.updDate || "—"}</span>
+                          {ext.updFileId && <button onClick={() => downloadFile(ext.updFileId, `УПД_${ext.updNum}.pdf`)} className="text-blue-400 hover:text-blue-300 text-[10px]">⬇ Скачать</button>}
+                        </div>
+                      ) : <span className="text-amber-400 text-xs">⏳ Не отгружен</span>}
+                    </div>
+                  )}
                 </div>
               ))}
               <div className="grid grid-cols-2 gap-3 text-sm mt-2">
@@ -3234,7 +3430,6 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults, acquireLock
                 className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm text-white">
                 <option value="domestic">ROT (Rotable)</option>
                 <option value="export">EXP (Expendable)</option>
-                <option value="yoon">YOON</option>
               </select>
             </div>
           </div>
@@ -4799,7 +4994,12 @@ const BankImport = ({ balances, setBalances, openPo, setOpenPo, finResults, setF
               ? "bg-[#1E3A5F] text-white border-r border-[#1E3A5F]"
               : "bg-white text-gray-500 hover:bg-gray-50 border-r border-[#1E3A5F]/20"
           }`}>
-          <span className="text-lg">🇷🇺</span> Платёжный документ РФ
+          <svg width="22" height="15" viewBox="0 0 22 15" className="rounded-sm shadow-sm flex-shrink-0" aria-label="Флаг России">
+            <rect width="22" height="5" y="0"  fill="#FFFFFF"/>
+            <rect width="22" height="5" y="5"  fill="#003DA5"/>
+            <rect width="22" height="5" y="10" fill="#CC0000"/>
+          </svg>
+          Платёжный документ РФ
         </button>
         <button onClick={() => switchDocumentKind("foreign")}
           className={`flex-1 py-3.5 px-6 text-sm font-semibold transition-all flex items-center justify-center gap-2.5 ${
@@ -5344,17 +5544,21 @@ export default function App() {
           deliveryCost: r.deliveryCost,
           orderStage: r.orderStage || (r.status === "completed" ? "done" : r.status === "cancelled" ? "cancelled" : "in_work"),
         })));
-        setFinResults(fin.map((r) => ({
-          ...r,
-          customerAmount: parseFloat(r.customerAmount) || 0,
-          supplierAmount: parseFloat(r.supplierAmount) || 0,
-          paymentFact: parseFloat(r.paymentFact) || 0,
-          paymentWithAgent: parseFloat(r.paymentWithAgent) || 0,
-          customsCost: parseFloat(r.customsCost) || 0,
-          deliveryCost: parseFloat(r.deliveryCost) || 0,
-          margin: parseFloat(r.margin) || 0,
-          netProfit: parseFloat(r.netProfit) || 0,
-        })));
+        setFinResults(
+          fin.map((r) =>
+            normalizeFinResultRowStatus({
+              ...r,
+              customerAmount: parseFloat(r.customerAmount) || 0,
+              supplierAmount: parseFloat(r.supplierAmount) || 0,
+              paymentFact: parseFloat(r.paymentFact) || 0,
+              paymentWithAgent: parseFloat(r.paymentWithAgent) || 0,
+              customsCost: parseFloat(r.customsCost) || 0,
+              deliveryCost: parseFloat(r.deliveryCost) || 0,
+              margin: parseFloat(r.margin) || 0,
+              netProfit: parseFloat(r.netProfit) || 0,
+            })
+          )
+        );
         setDebts(dbt.map((r) => ({ ...r, amount: parseFloat(r.amount) || 0 })));
         setBalances(bal.map((r) => ({ ...r, balance: parseFloat(r.balance) || 0 })));
         setInfraData(Object.fromEntries(
@@ -5391,7 +5595,18 @@ export default function App() {
     let destroyed = false;
 
     const normPo = (r) => ({ ...r, customerAmount: parseFloat(r.customerAmount) || 0, supplierAmount: parseFloat(r.supplierAmount) || 0, orderStage: r.orderStage || (r.status === "completed" ? "done" : r.status === "cancelled" ? "cancelled" : "in_work") });
-    const normFin = (r) => ({ ...r, customerAmount: parseFloat(r.customerAmount) || 0, supplierAmount: parseFloat(r.supplierAmount) || 0, paymentFact: parseFloat(r.paymentFact) || 0, paymentWithAgent: parseFloat(r.paymentWithAgent) || 0, customsCost: parseFloat(r.customsCost) || 0, deliveryCost: parseFloat(r.deliveryCost) || 0, margin: parseFloat(r.margin) || 0, netProfit: parseFloat(r.netProfit) || 0 });
+    const normFin = (r) =>
+      normalizeFinResultRowStatus({
+        ...r,
+        customerAmount: parseFloat(r.customerAmount) || 0,
+        supplierAmount: parseFloat(r.supplierAmount) || 0,
+        paymentFact: parseFloat(r.paymentFact) || 0,
+        paymentWithAgent: parseFloat(r.paymentWithAgent) || 0,
+        customsCost: parseFloat(r.customsCost) || 0,
+        deliveryCost: parseFloat(r.deliveryCost) || 0,
+        margin: parseFloat(r.margin) || 0,
+        netProfit: parseFloat(r.netProfit) || 0,
+      });
     const normDebt = (r) => ({ ...r, amount: parseFloat(r.amount) || 0 });
     const normBal = (r) => ({ ...r, balance: parseFloat(r.balance) || 0 });
     const normInfra = (r) => ({ ...r, received: parseFloat(r.received) || 0, outgoing: parseFloat(r.outgoing) || 0, bankFees: parseFloat(r.bankFees) || 0, balance: parseFloat(r.balance) || 0 });

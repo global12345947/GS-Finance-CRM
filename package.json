@@ -7,6 +7,9 @@
   "scripts": {
     "dev": "vite build && node server/index.cjs",
     "seed": "node server/seed.cjs",
+    "sync:open-po": "node scripts/sync-open-po-from-excel.cjs",
+    "import:finances": "node scripts/import-finances-from-xlsx.cjs",
+    "reimport:fin": "node scripts/reimport-fin-with-fixes.cjs",
     "build": "vite build",
     "preview": "vite preview",
     "start:prod": "npm run build && node server/index.cjs",
@@ -32,11 +35,13 @@
     "autoprefixer": "^10.4.20",
     "electron": "^41.1.0",
     "electron-builder": "^26.8.1",
+    "exceljs": "^4.4.0",
     "postcss": "^8.4.49",
     "sharp": "^0.34.5",
     "tailwindcss": "^3.4.17",
     "to-ico": "^1.1.5",
-    "vite": "^6.0.7"
+    "vite": "^6.0.7",
+    "xlsx": "^0.18.5"
   },
   "build": {
     "appId": "com.globalsmart.crm",
