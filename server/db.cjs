@@ -151,6 +151,16 @@ const initDB = async () => {
         mime_type TEXT,
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
+
+      CREATE TABLE IF NOT EXISTS import_history (
+        id SERIAL PRIMARY KEY,
+        file_id TEXT,
+        parsed_data JSONB,
+        matched_po_id INTEGER,
+        infra_account TEXT,
+        status TEXT DEFAULT 'applied',
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
     `);
 
     // Миграции: добавление недостающих колонок
@@ -161,6 +171,7 @@ const initDB = async () => {
       { table: "pending_transfers", column: "to_currency", type: "TEXT" },
       { table: "pending_transfers", column: "exchange_rate", type: "NUMERIC" },
       { table: "pending_transfers", column: "converted_amount", type: "NUMERIC" },
+      { table: "open_po", column: "payment_file_id", type: "TEXT" },
     ];
     for (const m of migrations) {
       try {

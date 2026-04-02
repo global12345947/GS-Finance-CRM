@@ -8,6 +8,10 @@ const IS_DEV = !app.isPackaged;
 let mainWindow = null;
 let tray = null;
 
+if (process.platform === "win32") {
+  app.setAppUserModelId("com.globalsmart.crm");
+}
+
 function loadConfig() {
   try {
     return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8"));
@@ -71,8 +75,14 @@ function loadServer(url) {
 }
 
 function getIconPath() {
-  const ico = path.join(__dirname, "resources", "icon.ico");
-  if (fs.existsSync(ico)) return ico;
+  const candidates = app.isPackaged
+    ? [
+        path.join(process.resourcesPath, "icon.ico"),
+        path.join(process.resourcesPath, "app.asar.unpacked", "electron", "resources", "icon.ico"),
+      ]
+    : [path.join(__dirname, "resources", "icon.ico")];
+  const iconPath = candidates.find((candidate) => fs.existsSync(candidate));
+  if (iconPath) return iconPath;
   return undefined;
 }
 

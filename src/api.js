@@ -72,3 +72,24 @@ export const uploadFile = async (file, entityType, entityId) => {
 };
 
 export const getFileUrl = (fileId) => `${API}/files/${fileId}`;
+
+// ==================== Импорт платежей ====================
+export const parsePayment = async (file) => {
+  const formData = new FormData();
+  formData.append("file", file);
+  const r = await fetch(`${API}/import/parse`, { method: "POST", body: formData });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+    throw new Error(err.error || `HTTP ${r.status}`);
+  }
+  return r.json();
+};
+
+export const matchPayment = (data) =>
+  fetch(`${API}/import/match`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(json);
+
+export const applyImport = (data) =>
+  fetch(`${API}/import/apply`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(json);
+
+export const undoImport = (data) =>
+  fetch(`${API}/import/undo`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(json);

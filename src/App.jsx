@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback, useEffect } from "react";
+import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import * as api from "./api.js";
 
 // ==================== УТИЛИТЫ ====================
@@ -2459,10 +2459,16 @@ const OpenPO = ({ data, setData, pushLog, finResults, setFinResults }) => {
           </div>
                           ) : (() => {
                             if (!payments.length) return <span className="text-gray-400 cursor-pointer text-[10px]" onClick={() => startInlineEdit(o, "paymentStatusSupplier")}>—</span>;
-                            return <div className="space-y-0.5" onClick={() => startInlineEdit(o, "paymentStatusSupplier")}>
+                            return <div className="space-y-0.5">
                               {payments.map((p, pi) => {
                                 const paid = p.toLowerCase().includes("paid") && !p.toLowerCase().includes("not paid");
-                                return <div key={pi} className={`px-1 py-0.5 rounded text-[9px] font-medium cursor-pointer ${paid ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}>{p}</div>;
+                                return <div key={pi} className="flex items-center justify-center gap-1">
+                                  <div onClick={() => startInlineEdit(o, "paymentStatusSupplier")} className={`px-1 py-0.5 rounded text-[9px] font-medium cursor-pointer ${paid ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}>{p}</div>
+                                  {paid && o.paymentFileId && (
+                                    <a href={api.getFileUrl(o.paymentFileId)} title="Скачать платёжку" onClick={(e) => e.stopPropagation()}
+                                      className="text-blue-500 hover:text-blue-700 text-xs">📎</a>
+                                  )}
+                                </div>;
                               })}
                             </div>;
                           })()}
@@ -4012,119 +4018,425 @@ const Infrastructure = ({ balances, setBalances, pushLog, infraData, setInfraDat
 };
 
 // ==================== ИМПОРТ БАНКОВСКИХ ПЛАТЕЖЕЙ ====================
-const BankImport = ({ balances, setBalances }) => {
-  const [csvText, setCsvText] = useState("");
-  const [parsedRows, setParsedRows] = useState([]);
+const BankImport = ({ balances, setBalances, openPo, setOpenPo, infraData, setInfraData, pushLog }) => {
+  const [step, setStep] = useState(0);
+  const [file, setFile] = useState(null);
+  const [dragOver, setDragOver] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [parsed, setParsed] = useState(null);
+  const [editParsed, setEditParsed] = useState(null);
+  const [suggestedAccount, setSuggestedAccount] = useState("");
+  const [matches, setMatches] = useState([]);
+  const [selectedPo, setSelectedPo] = useState(null);
+  const [selectedAccount, setSelectedAccount] = useState("");
+  const [applying, setApplying] = useState(false);
+  const [result, setResult] = useState(null);
+  const [aiReasoning, setAiReasoning] = useState("");
+  const [aiConfidence, setAiConfidence] = useState("");
+  const [history, setHistory] = useState([]);
 
-  const parseCSV = () => {
-    const lines = csvText.trim().split("\n");
-    if (lines.length < 2) return;
-    const headers = lines[0].split(";").map((h) => h.trim());
-    const rows = lines.slice(1).map((line, i) => {
-      const cols = line.split(";").map((c) => c.trim());
-      const obj = {};
-      headers.forEach((h, j) => (obj[h] = cols[j] || ""));
-      obj._id = i; obj._infra = ""; obj._type = "expense";
-      return obj;
-    });
-    setParsedRows(rows);
+  const fmt = (n) => n?.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) || "0.00";
+
+  const reset = () => {
+    setStep(0); setFile(null); setLoading(false); setError("");
+    setParsed(null); setEditParsed(null); setSuggestedAccount("");
+    setMatches([]); setSelectedPo(null); setSelectedAccount(""); setResult(null);
+    setAiReasoning(""); setAiConfidence("");
   };
 
-  const updateRow = (id, field, value) => setParsedRows(parsedRows.map((r) => (r._id === id ? { ...r, [field]: value } : r)));
-
-  const importAll = () => {
-    const newBalances = [...balances];
-    parsedRows.forEach((row) => {
-      if (!row._infra) return;
-      const amount = parseFloat(Object.values(row).find((v) => !isNaN(parseFloat(v)) && parseFloat(v) > 0)) || 0;
-      if (!amount) return;
-      const bIdx = newBalances.findIndex((b) => b.name === row._infra);
-      if (bIdx >= 0) newBalances[bIdx] = { ...newBalances[bIdx], balance: newBalances[bIdx].balance + (row._type === "income" ? amount : -amount) };
-    });
-    setBalances(newBalances);
-    setParsedRows([]);
-    setCsvText("");
+  const handleFile = (f) => {
+    if (!f) return;
+    const ok = ["application/pdf", "image/jpeg", "image/png", "text/csv"];
+    if (!ok.includes(f.type) && !f.name.endsWith(".csv")) {
+      setError("Поддерживаются: PDF, JPEG, PNG, CSV");
+      return;
+    }
+    setFile(f); setError(""); setStep(0);
+    setParsed(null); setEditParsed(null); setMatches([]);
+    setSelectedPo(null); setAiReasoning(""); setAiConfidence("");
+    setResult(null);
   };
+
+  const handleUploadAndParse = async () => {
+    if (!file) return;
+    setLoading(true); setError("");
+    try {
+      const res = await api.parsePayment(file);
+      setParsed(res.parsed);
+      setEditParsed({ ...res.parsed });
+      setSuggestedAccount(res.suggestedAccount || "");
+      setSelectedAccount(res.suggestedAccount || "");
+      setStep(1);
+    } catch (err) {
+      setError(err.message || "Ошибка при парсинге");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleMatch = async () => {
+    setLoading(true); setError("");
+    try {
+      const res = await api.matchPayment({
+        beneficiary: editParsed.beneficiary,
+        amount: editParsed.amount,
+        currency: editParsed.currency,
+        reference: editParsed.reference,
+        payer: editParsed.payer,
+      });
+      setMatches(res.matches || []);
+      setAiReasoning(res.aiReasoning || "");
+      setAiConfidence(res.aiConfidence || "none");
+      if (res.matches?.length === 1) setSelectedPo(res.matches[0]);
+      setStep(2);
+    } catch (err) {
+      setError(err.message || "Ошибка поиска");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleApply = async () => {
+    setApplying(true); setError("");
+    try {
+      let paymentFileId = null;
+      const uploaded = await api.uploadFile(file, "payments", selectedPo?.id);
+      paymentFileId = uploaded.id;
+
+      const acc = balances.find((b) => b.name === selectedAccount);
+      const applyData = {
+        poId: selectedPo?.id || null,
+        paymentFileId,
+        datePaid: editParsed.date,
+        infraAccount: selectedAccount || null,
+        outgoing: editParsed.amount,
+        bankFees: editParsed.fees,
+        supplier: editParsed.beneficiary,
+        poRef: editParsed.reference || selectedPo?.internalPoRef || "",
+        date: editParsed.date,
+        parsedData: editParsed,
+      };
+
+      const res = await api.applyImport(applyData);
+
+      const undoData = {
+        poId: selectedPo?.id || null,
+        prevPaymentStatus: res.prevPoPaymentStatus || "Not paid",
+        prevDatePaid: res.prevPoDatePaid || "",
+        prevPaymentFileId: res.prevPoPaymentFileId || null,
+        infraAccount: selectedAccount || null,
+        infraOpId: res.infraOpId || null,
+        prevBalance: res.prevBalance ?? null,
+        importHistoryId: res.importHistoryId || null,
+        paymentFileId,
+      };
+
+      if (res.poUpdated && selectedPo) {
+        pushLog({
+          type: "import_apply",
+          ...undoData,
+          prevPoState: {
+            paymentStatusSupplier: selectedPo.paymentStatusSupplier || "Not paid",
+            datePaidSupplier: selectedPo.datePaidSupplier || "",
+            paymentFileId: selectedPo.paymentFileId || null,
+          },
+        });
+        setOpenPo((prev) => prev.map((po) =>
+          po.id === selectedPo.id ? { ...po, paymentStatusSupplier: "Paid", datePaidSupplier: editParsed.date, paymentFileId } : po
+        ));
+      } else {
+        pushLog({ type: "import_apply", ...undoData });
+      }
+
+      if (res.infraOpCreated && selectedAccount) {
+        setBalances((prev) => prev.map((b) => b.name === selectedAccount ? { ...b, balance: res.newBalance } : b));
+
+        const poRef = editParsed.reference || selectedPo?.internalPoRef || "";
+        const newOp = {
+          id: res.infraOpId,
+          accountName: selectedAccount,
+          poRef,
+          received: 0,
+          outgoing: editParsed.amount,
+          bankFees: editParsed.fees || 0,
+          supplier: editParsed.beneficiary,
+          date: editParsed.date,
+          balance: res.newBalance,
+          description: poRef ? `Оплата поставщику ${editParsed.beneficiary} по ${poRef}` : `Оплата поставщику ${editParsed.beneficiary}`,
+        };
+        setInfraData((prev) => ({ ...prev, [selectedAccount]: [...(prev[selectedAccount] || []), newOp] }));
+      }
+
+      setResult(res);
+      setStep(3);
+    } catch (err) {
+      setError(err.message || "Ошибка при применении");
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  const EditField = ({ label, field, type }) => (
+    <div>
+      <label className="text-xs text-gray-500 font-medium mb-1 block">{label}</label>
+      <input type={type || "text"} value={editParsed[field] ?? ""} onChange={(e) => setEditParsed({ ...editParsed, [field]: type === "number" ? parseFloat(e.target.value) || 0 : e.target.value })}
+        className="w-full px-3 py-2 bg-gray-50 border border-gray-300 rounded-lg text-sm text-gray-900 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" />
+    </div>
+  );
 
   return (
     <div className="space-y-6">
-      {/* Инструкция */}
-      <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6">
-        <h3 className="text-[#1E3A5F] font-semibold text-base mb-4 flex items-center gap-2">
-          <span className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center text-lg">💳</span>
-          Импорт банковских платёжек
-        </h3>
-        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-5 text-sm text-blue-800">
-          <p className="font-semibold mb-2">Инструкция:</p>
-          <ol className="space-y-1 list-decimal list-inside text-blue-700">
-            <li>Скопируйте данные из банковской выписки (CSV; разделитель — точка с запятой)</li>
-            <li>Первая строка — заголовки, остальные — данные</li>
-            <li>Нажмите «Распарсить», назначьте инфраструктуру и тип каждой строке</li>
-            <li>Нажмите «Импортировать» для зачисления</li>
-          </ol>
-        </div>
-        <div>
-          <label className="text-xs text-gray-500 font-medium mb-1.5 block uppercase tracking-wider">Вставьте данные выписки</label>
-          <textarea value={csvText} onChange={(e) => setCsvText(e.target.value)}
-            placeholder={"Дата;Описание;Сумма;Валюта\n2026-03-01;Оплата WENCOR;3500;USD"}
-            className="w-full h-36 px-4 py-3 bg-gray-50 border border-gray-300 rounded-lg text-sm text-gray-900 font-mono placeholder-gray-400 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 resize-none" />
-        </div>
-        <div className="flex justify-end mt-4">
-          <button onClick={parseCSV} disabled={!csvText.trim()}
-            className="px-5 py-2.5 bg-[#1E3A5F] hover:bg-[#2A4A6F] disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors">
-            Распарсить
-          </button>
-        </div>
+      {/* Шаги */}
+      <div className="flex items-center gap-2 mb-2">
+        {["Загрузка", "Распознано", "Сопоставление", "Готово"].map((label, i) => (
+          <div key={i} className="flex items-center gap-2">
+            <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${step >= i ? "bg-[#1E3A5F] text-white" : "bg-gray-200 text-gray-500"}`}>
+              {step > i ? "✓" : i + 1}
+            </div>
+            <span className={`text-sm ${step >= i ? "text-[#1E3A5F] font-medium" : "text-gray-400"}`}>{label}</span>
+            {i < 3 && <div className={`w-8 h-0.5 ${step > i ? "bg-[#1E3A5F]" : "bg-gray-200"}`} />}
+          </div>
+        ))}
       </div>
 
-      {/* Таблица распознанных операций */}
-      {parsedRows.length > 0 && (
-        <div className="bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
-            <h3 className="text-[#1E3A5F] font-semibold text-base">
-              Распознанные операции <span className="text-gray-400 font-normal">({parsedRows.length})</span>
-            </h3>
-            <button onClick={importAll}
-              className="px-5 py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg text-sm font-medium transition-colors">
-              Импортировать
+      {/* ШАГ 0 — Загрузка файла */}
+      {step === 0 && (
+        <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6">
+          <h3 className="text-[#1E3A5F] font-semibold text-base mb-4 flex items-center gap-2">
+            <span className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center text-lg">📄</span>
+            Загрузите платёжный документ
+          </h3>
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-5 text-sm text-blue-800">
+            <p>Поддерживаемые форматы: <strong>PDF, JPEG, PNG, CSV</strong></p>
+            <p className="mt-1">AI автоматически распознает данные из документа любого банка</p>
+          </div>
+
+          <div
+            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => { e.preventDefault(); setDragOver(false); handleFile(e.dataTransfer.files[0]); }}
+            onClick={() => document.getElementById("import-file-input").click()}
+            className={`border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-colors ${
+              dragOver ? "border-blue-500 bg-blue-50" : file ? "border-emerald-400 bg-emerald-50" : "border-gray-300 hover:border-blue-400 hover:bg-blue-50/30"
+            }`}
+          >
+            <input id="import-file-input" type="file" accept=".pdf,.jpg,.jpeg,.png,.csv" onChange={(e) => handleFile(e.target.files[0])} className="hidden" />
+            {file ? (
+              <div>
+                <div className="text-3xl mb-2">✅</div>
+                <p className="text-gray-900 font-medium">{file.name}</p>
+                <p className="text-xs text-gray-500 mt-1">{(file.size / 1024).toFixed(1)} КБ</p>
+                <p className="text-xs text-blue-600 mt-2 hover:underline">Нажмите, чтобы заменить</p>
+              </div>
+            ) : (
+              <div>
+                <div className="text-4xl mb-3 text-gray-400">📥</div>
+                <p className="text-gray-600 font-medium">Перетащите файл сюда</p>
+                <p className="text-xs text-gray-400 mt-1">или нажмите для выбора</p>
+              </div>
+            )}
+          </div>
+
+          {error && <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>}
+
+          <div className="flex justify-end mt-5">
+            <button onClick={handleUploadAndParse} disabled={!file || loading}
+              className="px-6 py-2.5 bg-[#1E3A5F] hover:bg-[#2A4A6F] disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2">
+              {loading ? (
+                <><svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg> AI анализирует...</>
+              ) : "Распознать документ"}
             </button>
           </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="bg-[#1E3A5F] text-white text-center text-xs uppercase">
-                  {Object.keys(parsedRows[0]).filter((k) => !k.startsWith("_")).map((h) => (
-                    <th key={h} className="py-2.5 px-3 font-semibold">{h}</th>
-                  ))}
-                  <th className="py-2.5 px-3 font-semibold">Инфраструктура</th>
-                  <th className="py-2.5 px-3 font-semibold">Тип</th>
-                </tr>
-              </thead>
-              <tbody className="bg-white">
-                {parsedRows.map((row, idx) => (
-                  <tr key={row._id} className={`border-b border-gray-200 hover:bg-blue-50 transition-colors ${idx % 2 === 1 ? "bg-gray-50" : ""}`}>
-                    {Object.entries(row).filter(([k]) => !k.startsWith("_")).map(([k, v]) => (
-                      <td key={k} className="py-2.5 px-3 text-center text-gray-700 text-xs">{v}</td>
-                    ))}
-                    <td className="py-2.5 px-3 text-center">
-                      <select value={row._infra} onChange={(e) => updateRow(row._id, "_infra", e.target.value)}
-                        className="px-2 py-1.5 bg-white border border-gray-300 rounded-lg text-xs text-gray-700 focus:outline-none focus:border-blue-500">
-                        <option value="">— Выберите —</option>
-                        {balances.map((b) => <option key={b.name} value={b.name}>{b.name}</option>)}
-                      </select>
-                    </td>
-                    <td className="py-2.5 px-3 text-center">
-                      <select value={row._type} onChange={(e) => updateRow(row._id, "_type", e.target.value)}
-                        className="px-2 py-1.5 bg-white border border-gray-300 rounded-lg text-xs text-gray-700 focus:outline-none focus:border-blue-500">
-                        <option value="income">Приход</option>
-                        <option value="expense">Расход</option>
-                      </select>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        </div>
+      )}
+
+      {/* ШАГ 1 — Результат парсинга */}
+      {step === 1 && editParsed && (
+        <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6">
+          <h3 className="text-[#1E3A5F] font-semibold text-base mb-4 flex items-center gap-2">
+            <span className="w-8 h-8 bg-emerald-100 rounded-lg flex items-center justify-center text-lg">🔍</span>
+            Распознанные данные
+          </h3>
+          <p className="text-sm text-gray-500 mb-4">Проверьте и при необходимости исправьте</p>
+
+          <div className="grid grid-cols-2 gap-4">
+            <EditField label="Плательщик" field="payer" />
+            <EditField label="Получатель (поставщик)" field="beneficiary" />
+            <EditField label="Сумма" field="amount" type="number" />
+            <EditField label="Валюта" field="currency" />
+            <EditField label="Комиссия банка" field="fees" type="number" />
+            <EditField label="Дата платежа" field="date" type="date" />
+            <EditField label="Референс / номер ПО" field="reference" />
+            <EditField label="Банк" field="bankName" />
           </div>
+
+          {error && <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>}
+
+          <div className="flex justify-between mt-5">
+            <button onClick={reset} className="px-5 py-2.5 text-gray-600 hover:text-gray-900 text-sm transition-colors">
+              ← Назад
+            </button>
+            <button onClick={handleMatch} disabled={loading}
+              className="px-6 py-2.5 bg-[#1E3A5F] hover:bg-[#2A4A6F] disabled:opacity-40 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2">
+              {loading ? (
+                <><svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg> Поиск...</>
+              ) : "Найти совпадения в Open PO"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ШАГ 2 — Сопоставление */}
+      {step === 2 && (
+        <div className="space-y-5">
+          {/* Совпадения PO */}
+          <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6">
+            <h3 className="text-[#1E3A5F] font-semibold text-base mb-3 flex items-center gap-2">
+              <span className="w-8 h-8 bg-amber-100 rounded-lg flex items-center justify-center text-lg">🔗</span>
+              Совпадения в Open PO
+              {aiConfidence && (
+                <span className={`ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                  aiConfidence === "high" ? "bg-emerald-100 text-emerald-700" :
+                  aiConfidence === "medium" ? "bg-amber-100 text-amber-700" :
+                  "bg-gray-100 text-gray-500"
+                }`}>
+                  {aiConfidence === "high" ? "AI: высокая уверенность" : aiConfidence === "medium" ? "AI: средняя уверенность" : "AI: не найдено"}
+                </span>
+              )}
+            </h3>
+            {aiReasoning && (
+              <div className="mb-4 p-3 bg-indigo-50 border border-indigo-200 rounded-lg text-xs text-indigo-700">
+                <span className="font-semibold">AI:</span> {aiReasoning}
+              </div>
+            )}
+            {matches.length > 0 ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-[#1E3A5F] text-white text-center text-xs uppercase">
+                      <th className="py-2.5 px-3 font-semibold w-10"></th>
+                      <th className="py-2.5 px-3 font-semibold">PO</th>
+                      <th className="py-2.5 px-3 font-semibold">Клиент</th>
+                      <th className="py-2.5 px-3 font-semibold">Ext. PO</th>
+                      <th className="py-2.5 px-3 font-semibold">Поставщик</th>
+                      <th className="py-2.5 px-3 font-semibold">Сумма пост.</th>
+                      <th className="py-2.5 px-3 font-semibold">Оплата пост.</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {matches.map((m) => {
+                      const sel = selectedPo?.id === m.id;
+                      return (
+                        <tr key={m.id} onClick={() => setSelectedPo(sel ? null : m)}
+                          className={`border-b border-gray-200 cursor-pointer transition-colors ${sel ? "bg-blue-50 ring-1 ring-blue-400" : "hover:bg-gray-50"}`}>
+                          <td className="py-2.5 px-3 text-center">
+                            <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${sel ? "border-blue-500 bg-blue-500" : "border-gray-300"}`}>
+                              {sel && <span className="text-white text-xs">✓</span>}
+                            </div>
+                          </td>
+                          <td className="py-2.5 px-3 text-center text-xs font-medium text-gray-900">{m.internalPo}</td>
+                          <td className="py-2.5 px-3 text-center text-xs text-gray-700">{m.customer}</td>
+                          <td className="py-2.5 px-3 text-center text-xs text-gray-700 whitespace-pre-wrap">{m.internalPoRef}</td>
+                          <td className="py-2.5 px-3 text-center text-xs text-gray-700 whitespace-pre-wrap">{m.supplierName}</td>
+                          <td className="py-2.5 px-3 text-center text-xs text-gray-700">${fmt(parseFloat(m.supplierAmount) || 0)}</td>
+                          <td className="py-2.5 px-3 text-center text-xs">
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${m.paymentStatusSupplier?.toLowerCase().includes("paid") && !m.paymentStatusSupplier?.toLowerCase().includes("not") ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                              {m.paymentStatusSupplier || "Not paid"}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="text-center py-8 text-gray-400">
+                <div className="text-3xl mb-2">📋</div>
+                <p>Совпадений не найдено</p>
+                <p className="text-xs mt-1">Можно продолжить без привязки к PO</p>
+              </div>
+            )}
+          </div>
+
+          {/* Выбор инфраструктурного счёта */}
+          <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6">
+            <h3 className="text-[#1E3A5F] font-semibold text-base mb-4">Счёт списания</h3>
+            <select value={selectedAccount} onChange={(e) => setSelectedAccount(e.target.value)}
+              className="w-full px-3 py-2.5 bg-gray-50 border border-gray-300 rounded-lg text-sm text-gray-900 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
+              <option value="">— Не выбран —</option>
+              {balances.filter((b) => !b.name.includes("Сейф") && !b.name.includes("Crypto")).map((b) => (
+                <option key={b.name} value={b.name}>{b.name} ({b.currency}) — баланс: {fmt(parseFloat(b.balance) || 0)}</option>
+              ))}
+            </select>
+            {suggestedAccount && suggestedAccount !== selectedAccount && (
+              <p className="text-xs text-blue-600 mt-2 cursor-pointer hover:underline" onClick={() => setSelectedAccount(suggestedAccount)}>
+                Предложение AI: {suggestedAccount}
+              </p>
+            )}
+          </div>
+
+          {/* Предпросмотр изменений */}
+          <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6">
+            <h3 className="text-[#1E3A5F] font-semibold text-base mb-4">Предпросмотр изменений</h3>
+            <div className="space-y-3 text-sm">
+              {selectedPo && (
+                <div className="flex items-start gap-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                  <span className="text-blue-600 font-bold text-lg mt-0.5">📦</span>
+                  <div>
+                    <p className="text-blue-900 font-medium">Open PO: {selectedPo.internalPo}</p>
+                    <p className="text-blue-700 text-xs">Статус оплаты → <strong>Paid</strong></p>
+                    <p className="text-blue-700 text-xs">Дата оплаты → <strong>{editParsed.date}</strong></p>
+                    <p className="text-blue-700 text-xs">Файл платёжки → будет прикреплён</p>
+                  </div>
+                </div>
+              )}
+              {selectedAccount && (
+                <div className="flex items-start gap-3 p-3 bg-emerald-50 border border-emerald-200 rounded-lg">
+                  <span className="text-emerald-600 font-bold text-lg mt-0.5">🏦</span>
+                  <div>
+                    <p className="text-emerald-900 font-medium">{selectedAccount}</p>
+                    <p className="text-emerald-700 text-xs">Расход: <strong>${fmt(editParsed.amount)}</strong></p>
+                    {editParsed.fees > 0 && <p className="text-emerald-700 text-xs">Комиссия: <strong>${fmt(editParsed.fees)}</strong></p>}
+                    <p className="text-emerald-700 text-xs">Итого списание: <strong>${fmt(editParsed.amount + (editParsed.fees || 0))}</strong></p>
+                  </div>
+                </div>
+              )}
+              {!selectedPo && !selectedAccount && (
+                <p className="text-gray-400 text-center py-4">Выберите PO и/или счёт списания</p>
+              )}
+            </div>
+
+            {error && <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>}
+
+            <div className="flex justify-between mt-5">
+              <button onClick={() => setStep(1)} className="px-5 py-2.5 text-gray-600 hover:text-gray-900 text-sm transition-colors">
+                ← Назад
+              </button>
+              <button onClick={handleApply} disabled={applying || (!selectedPo && !selectedAccount)}
+                className="px-6 py-2.5 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2">
+                {applying ? (
+                  <><svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg> Применяю...</>
+                ) : "Применить"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ШАГ 3 — Результат */}
+      {step === 3 && result && (
+        <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-8 text-center">
+          <div className="text-5xl mb-4">✅</div>
+          <h3 className="text-[#1E3A5F] font-semibold text-xl mb-3">Платёж успешно импортирован</h3>
+          <div className="space-y-2 text-sm text-gray-600 mb-6">
+            {result.poUpdated && <p>Open PO обновлён — статус оплаты: <strong className="text-emerald-600">Paid</strong></p>}
+            {result.infraOpCreated && <p>Операция записана в <strong>{selectedAccount}</strong> — новый баланс: <strong className="text-blue-600">${fmt(result.newBalance)}</strong></p>}
+          </div>
+          <button onClick={reset} className="px-6 py-2.5 bg-[#1E3A5F] hover:bg-[#2A4A6F] text-white rounded-lg text-sm font-medium transition-colors">
+            Импортировать ещё
+          </button>
         </div>
       )}
     </div>
@@ -4232,11 +4544,16 @@ export default function App() {
   const syncDebts = useMemo(() => makeSyncSetter(setDebts, api.updateDebt, null), [makeSyncSetter]);
   const syncBalances = useMemo(() => makeSyncSetter(setBalances, (id, data) => api.updateBalance(id, data.balance), null), [makeSyncSetter]);
 
-  const pushLog = useCallback((a) => setActionLog((prev) => [...prev, a]), []);
+  const pushLog = useCallback((a) => setActionLog((prev) => [...prev, a].slice(-10)), []);
 
-  const undo = () => {
-    if (!actionLog.length) return;
-    const last = actionLog[actionLog.length - 1];
+  const actionLogRef = useRef(actionLog);
+  useEffect(() => { actionLogRef.current = actionLog; }, [actionLog]);
+
+  const undoRef = useRef(null);
+  undoRef.current = () => {
+    const log = actionLogRef.current;
+    if (!log.length) return;
+    const last = log[log.length - 1];
     if (last.type === "fin_status") syncFinResults((prev) => prev.map((r) => (r.id === last.id ? { ...r, status: last.prev } : r)));
     if (last.type === "fin_upd") syncFinResults((prev) => prev.map((r) => (r.id === last.id ? { ...r, ...last.prev, updFileId: null } : r)));
     if (last.type === "fin_payment") syncFinResults((prev) => prev.map((r) => (r.id === last.id ? { ...r, paymentFact: last.prev.paymentFact, paymentDocFileId: null, paymentDate: "" } : r)));
@@ -4250,9 +4567,51 @@ export default function App() {
     if (last.type === "po_stage") syncOpenPo((prev) => prev.map((r) => (r.id === last.id ? { ...r, orderStage: last.prev, status: last.prevStatus || "active" } : r)));
     if (last.type === "po_delete") syncOpenPo((prev) => [...prev, last.prev]);
     if (last.type === "debt_close") syncDebts((prev) => prev.map((d) => (d.id === last.id ? { ...d, ...last.prev } : d)));
+    if (last.type === "debt_close_auto") {
+      if (last.finResultId) syncFinResults((prev) => prev.map((r) => (r.id === last.finResultId ? { ...r, paymentFact: last.prev.paymentFact, paymentDocFileId: null, paymentDate: "" } : r)));
+    }
     if (last.type === "infra_payment") syncBalances((prev) => prev.map((b) => (b.name === last.accName ? { ...b, balance: last.prev } : b)));
+    if (last.type === "import_apply") {
+      api.undoImport({
+        poId: last.poId,
+        prevPaymentStatus: last.prevPaymentStatus,
+        prevDatePaid: last.prevDatePaid,
+        prevPaymentFileId: last.prevPaymentFileId,
+        infraAccount: last.infraAccount,
+        infraOpId: last.infraOpId,
+        prevBalance: last.prevBalance,
+        importHistoryId: last.importHistoryId,
+      }).catch((err) => console.error("Undo import error:", err));
+      if (last.poId && last.prevPoState) {
+        setOpenPo((prev) => prev.map((po) =>
+          po.id === last.poId ? { ...po, ...last.prevPoState } : po
+        ));
+      }
+      if (last.infraAccount && last.prevBalance !== null) {
+        setBalances((prev) => prev.map((b) => b.name === last.infraAccount ? { ...b, balance: last.prevBalance } : b));
+      }
+      if (last.infraAccount && last.infraOpId) {
+        setInfraData((prev) => ({
+          ...prev,
+          [last.infraAccount]: (prev[last.infraAccount] || []).filter((op) => op.id !== last.infraOpId),
+        }));
+      }
+    }
     setActionLog((prev) => prev.slice(0, -1));
   };
+
+  useEffect(() => {
+    const handler = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.code === "KeyZ") {
+        const tag = document.activeElement?.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || document.activeElement?.isContentEditable) return;
+        e.preventDefault();
+        undoRef.current?.();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   const activePO = openPo.filter((r) => r.status === "active").length;
   const autoDebtsCount = useMemo(() => getAutoDebts(finResults, debts, openPo), [finResults, debts, openPo]);
@@ -4273,11 +4632,14 @@ export default function App() {
       <div className="w-64 bg-[#1E3A5F] text-white flex flex-col fixed left-0 top-0 bottom-0">
         {/* Логотип и заголовок */}
         <div className="p-4 border-b border-[#2A4A6F]">
-          <div className="flex items-center gap-2 mb-4">
-            <div className="w-8 h-8 bg-white rounded flex items-center justify-center">
-              <span className="text-[#1E3A5F] font-bold text-lg">G</span>
+          <div className="flex items-center gap-3 mb-4">
+            <div className="relative w-14 h-14 rounded-full bg-white ring-1 ring-white/55 shadow-[inset_0_3px_14px_rgba(255,255,255,0.65),inset_0_-6px_12px_rgba(0,0,0,0.12),0_8px_20px_rgba(0,0,0,0.32)]">
+              <div className="absolute inset-[5px] rounded-full flex items-center justify-center overflow-hidden">
+                <img src="/logo.svg" alt="Global Smart" className="max-w-full max-h-full object-contain" />
+              </div>
+              <div className="pointer-events-none absolute inset-x-[10%] top-[8%] h-[40%] rounded-full bg-gradient-to-b from-white/80 via-white/35 to-transparent blur-[1px]" />
             </div>
-            <span className="font-semibold text-sm">Финансы</span>
+            <span className="font-semibold text-lg tracking-[0.01em]">Финансы</span>
           </div>
         </div>
 
@@ -4289,7 +4651,7 @@ export default function App() {
               activeTab === "dashboard" ? "bg-[#2A4A6F] text-white" : "text-gray-300 hover:bg-[#2A4A6F]/50"
             }`}
           >
-            <span className="text-lg">📊</span>
+            <span className="text-lg w-6 text-center shrink-0">📊</span>
             <span>Баланс</span>
           </button>
           <button
@@ -4298,7 +4660,7 @@ export default function App() {
               activeTab === "fin" ? "bg-[#2A4A6F] text-white" : "text-gray-300 hover:bg-[#2A4A6F]/50"
             }`}
           >
-            <span className="text-lg">💰</span>
+            <span className="text-lg w-6 text-center shrink-0">💰</span>
             <span>Фин. результат</span>
           </button>
           <button
@@ -4307,7 +4669,7 @@ export default function App() {
               activeTab === "openpo" ? "bg-[#2A4A6F] text-white" : "text-gray-300 hover:bg-[#2A4A6F]/50"
             }`}
           >
-            <span className="text-lg">📋</span>
+            <span className="text-lg w-6 text-center shrink-0">📋</span>
             <span>Open PO</span>
           </button>
           <button
@@ -4316,7 +4678,7 @@ export default function App() {
               activeTab === "debts" ? "bg-[#2A4A6F] text-white" : "text-gray-300 hover:bg-[#2A4A6F]/50"
             }`}
           >
-            <span className="text-lg">⚠</span>
+            <span className="text-lg w-6 text-center shrink-0">⚠</span>
             <span>Дебиторка</span>
           </button>
           <button
@@ -4325,7 +4687,7 @@ export default function App() {
               activeTab === "infra" ? "bg-[#2A4A6F] text-white" : "text-gray-300 hover:bg-[#2A4A6F]/50"
             }`}
           >
-            <span className="text-lg">🏦</span>
+            <span className="text-lg w-6 text-center shrink-0">🏦</span>
             <span>Инфраструктуры</span>
           </button>
           <button
@@ -4334,7 +4696,7 @@ export default function App() {
               activeTab === "import" ? "bg-[#2A4A6F] text-white" : "text-gray-300 hover:bg-[#2A4A6F]/50"
             }`}
           >
-            <span className="text-lg">💳</span>
+            <span className="text-lg w-6 text-center shrink-0">💳</span>
             <span>Импорт платежей</span>
           </button>
         </div>
@@ -4369,11 +4731,6 @@ export default function App() {
               {activeTab === "import" && "Импорт платежей"}
             </h1>
             <div className="flex items-center gap-3">
-              {actionLog.length > 0 && (
-                <button onClick={undo} className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded text-sm font-medium flex items-center gap-2 transition-colors">
-                  ↩ Отменить ({actionLog.length})
-                </button>
-              )}
               <div className="text-xs text-gray-500">{new Date().toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" })}</div>
             </div>
           </div>
@@ -4386,12 +4743,12 @@ export default function App() {
               <div className="text-gray-500 text-sm">Загрузка данных...</div>
             </div>
           ) : (<>
-          {activeTab === "dashboard" && <Dashboard balances={balances} debts={debts} finResults={finResults} openPo={openPo} infraData={infraData} />}
-          {activeTab === "fin" && <FinResults data={finResults} setData={syncFinResults} pushLog={pushLog} debts={debts} setDebts={syncDebts} />}
-          {activeTab === "openpo" && <OpenPO data={openPo} setData={syncOpenPo} pushLog={pushLog} finResults={finResults} setFinResults={syncFinResults} />}
-          {activeTab === "debts" && <Debts debts={debts} setDebts={syncDebts} pushLog={pushLog} finResults={finResults} setFinResults={syncFinResults} openPo={openPo} />}
-          {activeTab === "infra" && <Infrastructure balances={balances} setBalances={syncBalances} pushLog={pushLog} infraData={infraData} setInfraData={setInfraData} pendingTransfers={pendingTransfersGlobal} setPendingTransfers={setPendingTransfersGlobal} />}
-          {activeTab === "import" && <BankImport balances={balances} setBalances={syncBalances} />}
+          <div style={{ display: activeTab === "dashboard" ? "block" : "none" }}><Dashboard balances={balances} debts={debts} finResults={finResults} openPo={openPo} infraData={infraData} /></div>
+          <div style={{ display: activeTab === "fin" ? "block" : "none" }}><FinResults data={finResults} setData={syncFinResults} pushLog={pushLog} debts={debts} setDebts={syncDebts} /></div>
+          <div style={{ display: activeTab === "openpo" ? "block" : "none" }}><OpenPO data={openPo} setData={syncOpenPo} pushLog={pushLog} finResults={finResults} setFinResults={syncFinResults} /></div>
+          <div style={{ display: activeTab === "debts" ? "block" : "none" }}><Debts debts={debts} setDebts={syncDebts} pushLog={pushLog} finResults={finResults} setFinResults={syncFinResults} openPo={openPo} /></div>
+          <div style={{ display: activeTab === "infra" ? "block" : "none" }}><Infrastructure balances={balances} setBalances={syncBalances} pushLog={pushLog} infraData={infraData} setInfraData={setInfraData} pendingTransfers={pendingTransfersGlobal} setPendingTransfers={setPendingTransfersGlobal} /></div>
+          <div style={{ display: activeTab === "import" ? "block" : "none" }}><BankImport balances={balances} setBalances={syncBalances} openPo={openPo} setOpenPo={syncOpenPo} infraData={infraData} setInfraData={setInfraData} pushLog={pushLog} /></div>
           </>)}
         </div>
       </div>

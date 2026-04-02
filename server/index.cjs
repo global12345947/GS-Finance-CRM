@@ -1,3 +1,4 @@
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
@@ -10,6 +11,7 @@ const balancesRoutes = require("./routes/balances.cjs");
 const infraRoutes = require("./routes/infra.cjs");
 const transfersRoutes = require("./routes/transfers.cjs");
 const filesRoutes = require("./routes/files.cjs");
+const importRoutes = require("./routes/import.cjs");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -24,6 +26,7 @@ app.use("/api/balances", balancesRoutes);
 app.use("/api/infra", infraRoutes);
 app.use("/api/transfers", transfersRoutes);
 app.use("/api/files", filesRoutes);
+app.use("/api/import", importRoutes);
 
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", time: new Date().toISOString() });
